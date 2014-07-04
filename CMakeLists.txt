@@ -205,8 +205,8 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/config.h.in ${CMAKE_CURRENT_BINARY_DI
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
 
-file(GLOB etcd_cpp_header_files ${CMAKE_CURRENT_SOURCE_DIR}/include/pcl-cable-detection/*.h)
-install(FILES ${etcd_cpp_header_files} ${CMAKE_CURRENT_BINARY_DIR}/include/pcl-cable-detection/config.h DESTINATION include/pcl-cable-detection)
+file(GLOB PCL_CABLE_DETECTION_HEADER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/include/pcl-cable-detection/*.h)
+install(FILES ${PCL_CABLE_DETECTION_HEADER_FILES} ${CMAKE_CURRENT_BINARY_DIR}/include/pcl-cable-detection/config.h DESTINATION include/pcl-cable-detection)
 
 
 # pcl
@@ -228,7 +228,7 @@ if(MSGPACK_FOUND)
     # MSGPACK_LIB_DIR, the location of the libraries
     # MSGPACK_FOUND, If false, do not try to use MSGPACK
 else()
-    message("could not find msgpack")
+    message("could not find msgpack (optional)")
 endif()
 
 add_subdirectory(src)

@@ -9,6 +9,7 @@ if( EXTRA_MSVC_DEPEND )
   message(STATUS "adding msvc_boost dependency")
   add_dependencies(libpcl-cable-detection ${EXTRA_MSVC_DEPEND})
 endif()
+
 set_target_properties(libpcl-cable-detection PROPERTIES COMPILE_FLAGS "${EXTRA_COMPILE_FLAGS} ${Boost_CFLAGS} -DPCL_CABLE_DETECTION_DLL_EXPORTS -DPCL_CABLE_DETECTION_DLL" LINK_FLAGS ""
   OUTPUT_NAME pcl-cable-detection${PCL_CABLE_DETECTION_LIBRARY_SUFFIX}
   SOVERSION 0 # always have it 0 since we're including the soversion as part of the library name
@@ -29,7 +30,7 @@ macro(build_sample name)
   install(TARGETS ${name} DESTINATION bin)
 endmacro(build_sample)
 
-#build_sample(pcl-cable-detection-test)
+build_sample(pcl-cable-detection-test)
 if(MSGPACK_FOUND)
     build_sample(pcd-from-msgpackpoints)
 endif()
