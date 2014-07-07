@@ -2,15 +2,18 @@
 #define __PCL_CABLE_DETECTION__
 
 #include <pcl/ModelCoefficients.h>
+#include <pcl/common/io.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/voxel_grid.h>
-#include <pcl/common/io.h>
+#include <pcl/pcl_base.h>
 #include <pcl/point_types.h>
 #include <pcl/sample_consensus/method_types.h>
 #include <pcl/sample_consensus/model_types.h>
 #include <pcl/segmentation/sac_segmentation.h>
+#include <cstdlib> //random
 
 namespace pcl_cable_detection {
+
 template<typename PointT>
 bool findPlane(const typename pcl::PointCloud<PointT>::Ptr cloud,
                pcl::PointIndices& inlierindices,
@@ -62,5 +65,39 @@ bool findPlane(const typename pcl::PointCloud<PointT>::Ptr cloud,
     return true;
 }
 
+template<class PointT> class CableDetector : public pcl::PCLBase <PointT>
+{
+public:
+    CableDetector(){
+    }
+    virtual ~CableDetector(){
+    }
+
+    bool detect()
+    {
+        int index = rand()%(input_->size());
+    }
+
+    using pcl::PCLBase<PointT>::indices_;
+    using pcl::PCLBase<PointT>::input_;
+    using pcl::PCLBase<PointT>::use_indices_;
+protected:
+    inline bool
+    initCompute ()
+    {
+        if (!pcl::PCLBase<PointT>::initCompute ())
+        {
+            return (false);
+        }
+        if (!input_)
+        {
+            PCL_ERROR ("[initCompute] Input not set.\n");
+            return (false);
+        }
+        return (true);
+    }
+};
+
 } // namespace pcl_cable_detection
 #endif /* end of include guard */
+
