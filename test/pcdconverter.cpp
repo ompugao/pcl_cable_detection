@@ -42,21 +42,14 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // This is target object.
-    pcl::PointCloud<pcl::PointNormal> points;
-    
-    std::string content( (std::istreambuf_iterator<char>(fin) ),
-            (std::istreambuf_iterator<char>()    ) );
-    // Deserialize the serialized data.
-    msgpack::unpacked msg;    // includes memory pool and deserialized object
-    msgpack::unpack(&msg, content.data(), content.size());
-    msgpack::object obj = msg.get();
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::io::loadPCDFile (input_file, *cloud);
 
-    // Print the deserialized object to stdout.
-    //std::cout << obj << std::endl;    // ["Hello," "World!"]
-
-    // Convert the deserialized object to staticaly typed object.
-    obj.convert(&points);
-
-    pcl::io::savePCDFileBinaryCompressed (output_file, points);
+    for (size_t i = 0; i < cloud->points.size(); i++) {
+        cloud->points[i].x *= 10;
+        cloud->points[i].y *= 10;
+        cloud->points[i].z *= 10;
+    }
+    pcl::io::savePCDFileBinaryCompressed (output_file, *cloud);
 }

@@ -1,52 +1,52 @@
 /** \file config.h
     \brief Defines pcl-cable-detection installation-specific information.
 */
-#ifndef ETCD_CPP_DEFINITIONS_H
-#define ETCD_CPP_DEFINITIONS_H
+#ifndef PCL_CABLE_DETECTION_DEFINITIONS_H
+#define PCL_CABLE_DETECTION_DEFINITIONS_H
 
 #if defined(_WIN32) || defined(__CYGWIN__) || defined(_MSC_VER)
-  #define ETCD_CPP_HELPER_DLL_IMPORT __declspec(dllimport)
-  #define ETCD_CPP_HELPER_DLL_EXPORT __declspec(dllexport)
-  #define ETCD_CPP_HELPER_DLL_LOCAL
+  #define PCL_CABLE_DETECTION_HELPER_DLL_IMPORT __declspec(dllimport)
+  #define PCL_CABLE_DETECTION_HELPER_DLL_EXPORT __declspec(dllexport)
+  #define PCL_CABLE_DETECTION_HELPER_DLL_LOCAL
 #else
   #if __GNUC__ >= 4
-    #define ETCD_CPP_HELPER_DLL_IMPORT __attribute__ ((visibility("default")))
-    #define ETCD_CPP_HELPER_DLL_EXPORT __attribute__ ((visibility("default")))
-    #define ETCD_CPP_HELPER_DLL_LOCAL  __attribute__ ((visibility("hidden")))
+    #define PCL_CABLE_DETECTION_HELPER_DLL_IMPORT __attribute__ ((visibility("default")))
+    #define PCL_CABLE_DETECTION_HELPER_DLL_EXPORT __attribute__ ((visibility("default")))
+    #define PCL_CABLE_DETECTION_HELPER_DLL_LOCAL  __attribute__ ((visibility("hidden")))
   #else
-    #define ETCD_CPP_HELPER_DLL_IMPORT
-    #define ETCD_CPP_HELPER_DLL_EXPORT
-    #define ETCD_CPP_HELPER_DLL_LOCAL
+    #define PCL_CABLE_DETECTION_HELPER_DLL_IMPORT
+    #define PCL_CABLE_DETECTION_HELPER_DLL_EXPORT
+    #define PCL_CABLE_DETECTION_HELPER_DLL_LOCAL
   #endif
 #endif
 
-// Now we use the generic helper definitions above to define ETCD_CPP_API and ETCD_CPP_LOCAL.
-// ETCD_CPP_API is used for the public API symbols. It either DLL imports or DLL exports (or does nothing for static build)
-// ETCD_CPP_LOCAL is used for non-api symbols.
-#if defined(ETCD_CPP_DLL) || defined(ETCD_CPP_CORE_DLL) // defined if OpenRAVE is compiled as a DLL
-  #ifdef ETCD_CPP_DLL_EXPORTS // defined if we are building the OpenRAVE DLL (instead of using it)
-    #define ETCD_CPP_API ETCD_CPP_HELPER_DLL_EXPORT
+// Now we use the generic helper definitions above to define PCL_CABLE_DETECTION_API and PCL_CABLE_DETECTION_LOCAL.
+// PCL_CABLE_DETECTION_API is used for the public API symbols. It either DLL imports or DLL exports (or does nothing for static build)
+// PCL_CABLE_DETECTION_LOCAL is used for non-api symbols.
+#if defined(PCL_CABLE_DETECTION_DLL) || defined(PCL_CABLE_DETECTION_CORE_DLL) // defined if the library is compiled as a DLL
+  #ifdef PCL_CABLE_DETECTION_DLL_EXPORTS // defined if we are building the library DLL (instead of using it)
+    #define PCL_CABLE_DETECTION_API PCL_CABLE_DETECTION_HELPER_DLL_EXPORT
   #else
-    #define ETCD_CPP_API ETCD_CPP_HELPER_DLL_IMPORT
-  #endif // ETCD_CPP_DLL_EXPORTS
-  #define ETCD_CPP_LOCAL ETCD_CPP_HELPER_DLL_LOCAL
-#else // ETCD_CPP_DLL is not defined: this means OpenRAVE is a static lib.
-  #define ETCD_CPP_API
-  #define ETCD_CPP_LOCAL
-#endif // ETCD_CPP_DLL
+    #define PCL_CABLE_DETECTION_API PCL_CABLE_DETECTION_HELPER_DLL_IMPORT
+  #endif // PCL_CABLE_DETECTION_DLL_EXPORTS
+  #define PCL_CABLE_DETECTION_LOCAL PCL_CABLE_DETECTION_HELPER_DLL_LOCAL
+#else // PCL_CABLE_DETECTION_DLL is not defined: this means this library is a static lib.
+  #define PCL_CABLE_DETECTION_API
+  #define PCL_CABLE_DETECTION_LOCAL
+#endif // PCL_CABLE_DETECTION_DLL
 
-#define ETCD_CPP_VERSION_MAJOR @ETCD_CPP_VERSION_MAJOR@
-#define ETCD_CPP_VERSION_MINOR @ETCD_CPP_VERSION_MINOR@
-#define ETCD_CPP_VERSION_PATCH @ETCD_CPP_VERSION_PATCH@
-#define ETCD_CPP_VERSION_COMBINED(major, minor, patch) (((major) << 16) | ((minor) << 8) | (patch))
-#define ETCD_CPP_VERSION ETCD_CPP_VERSION_COMBINED(ETCD_CPP_VERSION_MAJOR, ETCD_CPP_VERSION_MINOR, ETCD_CPP_VERSION_PATCH)
-#define ETCD_CPP_VERSION_EXTRACT_MAJOR(version) (((version)>>16)&0xff)
-#define ETCD_CPP_VERSION_EXTRACT_MINOR(version) (((version)>>8)&0xff)
-#define ETCD_CPP_VERSION_EXTRACT_PATCH(version) (((version))&0xff)
-#define ETCD_CPP_VERSION_STRING "@ETCD_CPP_VERSION_MAJOR@.@ETCD_CPP_VERSION_MINOR@.@ETCD_CPP_VERSION_PATCH@"
-#define ETCD_CPP_VERSION_STRING_FORMAT(version) boost::str(boost::format("%s.%s.%s")%(ETCD_CPP_VERSION_EXTRACT_MAJOR(version))%(ETCD_CPP_VERSION_EXTRACT_MINOR(version))%(ETCD_CPP_VERSION_EXTRACT_PATCH(version)))
+#define PCL_CABLE_DETECTION_VERSION_MAJOR @PCL_CABLE_DETECTION_VERSION_MAJOR@
+#define PCL_CABLE_DETECTION_VERSION_MINOR @PCL_CABLE_DETECTION_VERSION_MINOR@
+#define PCL_CABLE_DETECTION_VERSION_PATCH @PCL_CABLE_DETECTION_VERSION_PATCH@
+#define PCL_CABLE_DETECTION_VERSION_COMBINED(major, minor, patch) (((major) << 16) | ((minor) << 8) | (patch))
+#define PCL_CABLE_DETECTION_VERSION PCL_CABLE_DETECTION_VERSION_COMBINED(PCL_CABLE_DETECTION_VERSION_MAJOR, PCL_CABLE_DETECTION_VERSION_MINOR, PCL_CABLE_DETECTION_VERSION_PATCH)
+#define PCL_CABLE_DETECTION_VERSION_EXTRACT_MAJOR(version) (((version)>>16)&0xff)
+#define PCL_CABLE_DETECTION_VERSION_EXTRACT_MINOR(version) (((version)>>8)&0xff)
+#define PCL_CABLE_DETECTION_VERSION_EXTRACT_PATCH(version) (((version))&0xff)
+#define PCL_CABLE_DETECTION_VERSION_STRING "@PCL_CABLE_DETECTION_VERSION_MAJOR@.@PCL_CABLE_DETECTION_VERSION_MINOR@.@PCL_CABLE_DETECTION_VERSION_PATCH@"
+#define PCL_CABLE_DETECTION_VERSION_STRING_FORMAT(version) boost::str(boost::format("%s.%s.%s")%(PCL_CABLE_DETECTION_VERSION_EXTRACT_MAJOR(version))%(PCL_CABLE_DETECTION_VERSION_EXTRACT_MINOR(version))%(PCL_CABLE_DETECTION_VERSION_EXTRACT_PATCH(version)))
 
-#define ETCD_CPP_VERSION_GE(major1, minor1, patch1, major2, minor2, patch2) (ETCD_CPP_VERSION_COMBINED(major1, minor1, patch1) >= ETCD_CPP_VERSION_COMBINED(major2, minor2, patch2))
-#define ETCD_CPP_VERSION_MINIMUM(major, minor, patch) ETCD_CPP_VERSION_GE(ETCD_CPP_VERSION_MAJOR, ETCD_CPP_VERSION_MINOR, ETCD_CPP_VERSION_PATCH, major, minor, patch)
+#define PCL_CABLE_DETECTION_VERSION_GE(major1, minor1, patch1, major2, minor2, patch2) (PCL_CABLE_DETECTION_VERSION_COMBINED(major1, minor1, patch1) >= PCL_CABLE_DETECTION_VERSION_COMBINED(major2, minor2, patch2))
+#define PCL_CABLE_DETECTION_VERSION_MINIMUM(major, minor, patch) PCL_CABLE_DETECTION_VERSION_GE(PCL_CABLE_DETECTION_VERSION_MAJOR, PCL_CABLE_DETECTION_VERSION_MINOR, PCL_CABLE_DETECTION_VERSION_PATCH, major, minor, patch)
 
 #endif

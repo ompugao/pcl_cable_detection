@@ -7,6 +7,7 @@ macro(build_sample name)
 endmacro(build_sample)
 
 build_sample(pcl-cable-detection-test)
+build_sample(pcdconverter)
 if(MSGPACK_FOUND)
     build_sample(pcd-from-msgpackpoints)
 endif()

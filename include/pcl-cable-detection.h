@@ -5,6 +5,7 @@
 #include <pcl/common/io.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/search/kdtree.h>
 #include <pcl/pcl_base.h>
 #include <pcl/point_types.h>
 #include <pcl/sample_consensus/method_types.h>
@@ -14,12 +15,19 @@
 
 namespace pcl_cable_detection {
 
+/** \brief find plane
+ * \param[in] cloud the PointCloud dataset
+ * \param[in] voxelleafsize the size of voxelleaf
+ * \param[in] distthreshold the distance threshold to determine whether each point belongs to plane or not
+ * \param[out] inlierindices inlier indices of the points which is contained inside the plane
+ * \param[out] modelcoeffs coefficients of the plane
+ */
 template<typename PointT>
 bool findPlane(const typename pcl::PointCloud<PointT>::Ptr cloud,
-               pcl::PointIndices& inlierindices,
-               pcl::ModelCoefficients& modelcoeffs,
                double voxelleafsize,
-               double distthreshold
+               double distthreshold,
+               pcl::PointIndices& inlierindices,
+               pcl::ModelCoefficients& modelcoeffs
                )
 {
     // Create voxel grid
@@ -65,38 +73,30 @@ bool findPlane(const typename pcl::PointCloud<PointT>::Ptr cloud,
     return true;
 }
 
-template<class PointT> class CableDetector : public pcl::PCLBase <PointT>
+/** \brief compute curvature histogram for each point using a given radius
+ */
+template<typename PointT, int N>
+void computeCurvatureHistogram(const typename pcl::PointCloud<PointT>::Ptr cloud,
+                               int pointindex,
+                               double radius, //pcl::PointIndices::Ptr indices,
+                               float min,
+                               float max,
+                               pcl::Histogram<N>& histogram
+                               )
 {
-public:
-    CableDetector(){
-    }
-    virtual ~CableDetector(){
-    }
+    typedef typename pcl::search::KdTree<PointT> KdTree;
+    typedef typename pcl::search::KdTree<PointT>::Ptr KdTreePtr;
+    std::vector<int> k_indices;
+    std::vector<float> k_sqr_distances;
+    KdTreePtr tree (new KdTree());
+    tree->setInputCloud(cloud);
+    tree->radiusSearch (cloud->points[index], radius, k_indices, k_sqr_distances);
 
-    bool detect()
-    {
-        int index = rand()%(input_->size());
+    float binwidth = (max - min) * 1.0 / N;
+    for (std::vector<int>::const_iterator itr = k_indices.begin(); itr != k_indices.end(); ++itr) {
+        histogram[(cloud->points[*itr].curvature)/binwidth] += 1;
     }
-
-    using pcl::PCLBase<PointT>::indices_;
-    using pcl::PCLBase<PointT>::input_;
-    using pcl::PCLBase<PointT>::use_indices_;
-protected:
-    inline bool
-    initCompute ()
-    {
-        if (!pcl::PCLBase<PointT>::initCompute ())
-        {
-            return (false);
-        }
-        if (!input_)
-        {
-            PCL_ERROR ("[initCompute] Input not set.\n");
-            return (false);
-        }
-        return (true);
-    }
-};
+}
 
 } // namespace pcl_cable_detection
 #endif /* end of include guard */
