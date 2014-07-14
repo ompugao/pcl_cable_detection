@@ -1,5 +1,7 @@
 #include <iostream>
 #include <boost/program_options.hpp>
+#include <boost/lexical_cast.hpp>
+#include <boost/utility.hpp>
 #include <pcl/io/pcd_io.h>
 #include <pcl/console/print.h>
 #include <pcl/features/normal_3d.h>
@@ -7,94 +9,282 @@
 #include <pcl/kdtree/kdtree.h>
 #include <pcl/visualization/cloud_viewer.h>
 #include "pcl-cable-detection.h"
+#include <sstream>
 
 class CableDetection {
 public:
-    CableDetection(typename pcl::PointCloud<pcl::PointNormal>::Ptr input, double searchradius, double distthreshold_cylindermodel)
+    class CableSlice {
+    public:
+        //std::string name;
+        pcl::ModelCoefficients::Ptr cylindercoeffs;
+        pcl::PointIndices::Ptr indices;
+
+        CableSlice() {
+            cylindercoeffs.reset(new pcl::ModelCoefficients());
+            indices.reset(new pcl::PointIndices());
+        }
+        virtual ~CableSlice(){
+            cylindercoeffs.reset();
+            indices.reset();
+        }
+        //copy constructor
+        //CableSlice(const CableSlice& sliceorig) {
+            //cylindercoeffs = sliceorig.cylindercoeffs->;
+        //} 
+        typedef boost::shared_ptr<CableSlice> Ptr;
+        typedef boost::shared_ptr<CableSlice const> ConstPtr ;
+    };
+    typedef boost::shared_ptr<CableSlice> CableSlicePtr;
+    typedef boost::shared_ptr<CableSlice const> CableSliceConstPtr;
+
+    //typedef std::list<CableSlice> Cable;
+    typedef std::list<CableSlicePtr> Cable;
+
+    CableDetection(pcl::PointCloud<pcl::PointNormal>::Ptr input, double cableradius, double cableslicelen, double distthreshold_cylindermodel)
     {
         input_ = input;
+        // create pointcloud<pointxyz>
+        points_.reset(new pcl::PointCloud<pcl::PointXYZ>());
+        pcl::copyPointCloud(*input_, *points_);
+
         // Set up the full indices set
+        // NOTE: do not remove points from input_
+        // it will mess up indices_ and points_
         std::vector<int> full_indices (input_->points.size ());
         indices_.reset(new pcl::PointIndices());
         indices_->indices.resize(input_->points.size());
         for (int fii = 0; fii < static_cast<int> (indices_->indices.size ()); ++fii) {  // fii = full indices iterator
             indices_->indices[fii] = fii;
         }
-        searchradius_ = searchradius;
+        cableradius_ = cableradius;
+        cableslicelen_ = cableslicelen;
         distthreshold_cylindermodel_ = distthreshold_cylindermodel;
         viewer_.reset(new pcl::visualization::PCLVisualizer("PCL viewer_"));
         viewer_->setBackgroundColor (0.0, 0.0, 0.0);
         viewer_->addPointCloud<pcl::PointNormal> (input_, "cloud");
         viewer_->registerAreaPickingCallback(boost::bind(&CableDetection::area_picking_callback, this,_1));
         viewer_->registerPointPickingCallback(boost::bind(&CableDetection::point_picking_callback, this, _1));
+    }
+
+    void RunViewer(){
         while (!viewer_->wasStopped ())
         {
             viewer_->spinOnce ();
         }
     }
 
-    void point_picking_callback(const pcl::visualization::PointPickingEvent& event)
+    void point_picking_callback (const pcl::visualization::PointPickingEvent& event)
     {
-        pcl::PointXYZ pt;
-        event.getPoint (pt.x, pt.y, pt.z);
+        boost::mutex::scoped_lock lock(cables_mutex_);
+        //pcl::PointXYZ pt;
+        //event.getPoint (pt.x, pt.y, pt.z);
         size_t idx = event.getPointIndex ();
         std::cout << "picking point index: " << idx << std::endl;
+        //cables_.resize(cables_.size()+1);
+        //Cable& cable = cables_[cables_.size()];
+        Cable cable;
 
-        // get the points close to the picked point
-        //std::vector<int> k_indices;
+        pcl::PointIndices::Ptr k_indices;
+        pcl::PointXYZ selectedpoint;
+        selectedpoint.x = input_->points[idx].x;
+        selectedpoint.y = input_->points[idx].y;
+        selectedpoint.z = input_->points[idx].z;
+        k_indices = findClosePointsIndices(selectedpoint);
+        pcl::PointXYZ pt;
+
+        CableSlicePtr slice, oldslice, baseslice;
+        slice.reset(new CableSlice());
+        oldslice.reset(new CableSlice());
+        bool cableslicefound = estimateCylinderAroundPointsIndices(k_indices, *slice);
+        if (!cableslicefound) {
+            PCL_INFO("[first search] no valid slice found\n");
+            return;
+        }
+        oldslice = slice; baseslice = slice;
+        std::cout << "first slice found!" << std::endl;
+        cable.push_back(slice);
+
+        // search forward
+        for(size_t iteration=0;;iteration++) {
+            std::cout << "search forward!" << std::endl;
+            pt.x = oldslice->cylindercoeffs->values[0] + oldslice->cylindercoeffs->values[3]*cableslicelen_;
+            pt.y = oldslice->cylindercoeffs->values[1] + oldslice->cylindercoeffs->values[4]*cableslicelen_;
+            pt.z = oldslice->cylindercoeffs->values[2] + oldslice->cylindercoeffs->values[5]*cableslicelen_;
+
+            k_indices = findClosePointsIndices(pt);
+            if (k_indices->indices.size() == 0) {
+                PCL_INFO("[forward search] no close points found (itr:%d)\n", iteration);
+                //TODO skip detection
+                break;
+            }
+
+            slice.reset(new CableSlice());
+            Eigen::Vector3f initialaxis(oldslice->cylindercoeffs->values[0] ,oldslice->cylindercoeffs->values[1] ,oldslice->cylindercoeffs->values[2]);
+            cableslicefound = estimateCylinderAroundPointsIndices(k_indices, *slice, initialaxis, 1.57);
+            if (!cableslicefound) {
+                PCL_INFO("[forward search]: no valid slice found (itr:%d)\n", iteration);
+                break;
+            }
+            cable.push_front(slice);
+            oldslice = slice;
+        }
+
+        oldslice = baseslice;
+        // search backward
+        for(size_t iteration=0;;iteration++) {
+            std::cout << "search backward!" << std::endl;
+            pt.x = oldslice->cylindercoeffs->values[0] - oldslice->cylindercoeffs->values[3]*cableslicelen_;
+            pt.y = oldslice->cylindercoeffs->values[1] - oldslice->cylindercoeffs->values[4]*cableslicelen_;
+            pt.z = oldslice->cylindercoeffs->values[2] - oldslice->cylindercoeffs->values[5]*cableslicelen_;
+
+            k_indices = findClosePointsIndices(pt);
+            if (k_indices->indices.size() == 0) {
+                PCL_INFO("[backward search] no close points found (itr:%d)\n", iteration);
+                //TODO skip detection
+                break;
+            }
+
+            slice.reset(new CableSlice());
+            Eigen::Vector3f initialaxis(oldslice->cylindercoeffs->values[0], oldslice->cylindercoeffs->values[1] ,oldslice->cylindercoeffs->values[2]);
+            cableslicefound = estimateCylinderAroundPointsIndices(k_indices, *slice, initialaxis, 1.57);
+            if (!cableslicefound) {
+                PCL_INFO("[backward search]: no valid points found (itr:%d)\n", iteration);
+                break;
+            }
+            cable.push_back(slice);
+            oldslice = slice;
+        }
+
+        viewer_->removeAllShapes();
+        size_t sliceindex = 0;
+        for (std::list<CableSlicePtr>::iterator itr = cable.begin(); itr != cable.end(); ++itr, ++sliceindex) {
+            if (sliceindex == cable.size()-1) {
+                break;
+            }
+            std::stringstream ss;
+            ss << "cylinder_" << sliceindex;
+            std::string cylindername = ss.str();
+            //viewer_->addCylinder(*cylindercoeffs);
+            pcl::PointXYZ pt0, pt1;
+            pt0.x = (*itr)->cylindercoeffs->values[0];
+            pt0.y = (*itr)->cylindercoeffs->values[1];
+            pt0.z = (*itr)->cylindercoeffs->values[2];
+            pt1.x = (*boost::next(itr))->cylindercoeffs->values[0];
+            pt1.y = (*boost::next(itr))->cylindercoeffs->values[1];
+            pt1.z = (*boost::next(itr))->cylindercoeffs->values[2];
+            viewer_->removeShape(cylindername);
+            viewer_->addLine(pt0, pt1,(sliceindex%3==0?1:0),((sliceindex+1)%3==0?1:0),((sliceindex+2)%3==0?1:0), cylindername);
+            std::stringstream textss;
+            textss << "slice_" << sliceindex;
+            viewer_->addText3D (textss.str(), pt0, 0.001);
+        }
+
+        /*{{{*/
+        /*
+        for (std::list<CableSlicePtr>::iterator itr = cable.begin(); itr != cable.end(); ++itr, ++sliceindex) {
+            std::stringstream ss;
+            ss << "cylinder_" << sliceindex;
+            std::string cylindername = ss.str();
+            //viewer_->addCylinder(*cylindercoeffs);
+            pcl::PointXYZ pt0, pt1, pt2;
+            pt0.x = (*itr)->cylindercoeffs->values[0];
+            pt0.y = (*itr)->cylindercoeffs->values[1];
+            pt0.z = (*itr)->cylindercoeffs->values[2];
+            pt1.x = (*itr)->cylindercoeffs->values[0] + (*itr)->cylindercoeffs->values[3]*cableslicelen_/2;
+            pt1.y = (*itr)->cylindercoeffs->values[1] + (*itr)->cylindercoeffs->values[4]*cableslicelen_/2;
+            pt1.z = (*itr)->cylindercoeffs->values[2] + (*itr)->cylindercoeffs->values[5]*cableslicelen_/2;
+            pt2.x = (*itr)->cylindercoeffs->values[0] - (*itr)->cylindercoeffs->values[3]*cableslicelen_/2;
+            pt2.y = (*itr)->cylindercoeffs->values[1] - (*itr)->cylindercoeffs->values[4]*cableslicelen_/2;
+            pt2.z = (*itr)->cylindercoeffs->values[2] - (*itr)->cylindercoeffs->values[5]*cableslicelen_/2;
+            viewer_->removeShape(cylindername);
+            viewer_->addArrow(pt1, pt2,(sliceindex%3==0?1:0),((sliceindex+1)%3==0?1:0),((sliceindex+2)%3==0?1:0), false, cylindername);
+            std::stringstream textss;
+            textss << "slice_" << sliceindex;
+            viewer_->addText3D (textss.str(), pt0, 0.001);
+        }
+        */
+        /*}}}*/
+
+        //std::cout << "extract model" << std::endl;
+        //pcl::ExtractIndices<pcl::PointNormal> extract;
+        //pcl::PointCloud<pcl::PointNormal>::Ptr extractedpoints(new pcl::PointCloud<pcl::PointNormal>());
+        //extract.setInputCloud (closepoints);
+        //extract.setIndices (cylinderinlierindices);
+        ////extract.setNegative (true);
+        //extract.filter (*extractedpoints);
+        //if (extractedpoints->points.size() > 0) {
+        //    pcl::io::savePCDFileBinaryCompressed ("extractedpoints.pcd", *extractedpoints);
+        //}
+    }
+
+    pcl::PointIndices::Ptr findClosePointsIndices(pcl::PointXYZ pt, double radius = 0) {/*{{{*/
+        if (radius == 0) {
+            radius = cableradius_ * 2;
+        }
         pcl::PointIndices::Ptr k_indices(new pcl::PointIndices());
         std::vector<float> k_sqr_distances;
-        pcl::search::KdTree<pcl::PointNormal>::Ptr tree (new pcl::search::KdTree<pcl::PointNormal>());
-        tree->setInputCloud(input_);
-        tree->radiusSearch (input_->points[idx], searchradius_, k_indices->indices, k_sqr_distances);
+        pcl::search::KdTree<pcl::PointXYZ>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZ>());
+        // NOTE: when you change input_, you also need to change points_!
+        tree->setInputCloud(points_);
+        tree->radiusSearch (pt, radius, k_indices->indices, k_sqr_distances);
+        return k_indices;
+    }/*}}}*/
 
-        pcl::ExtractIndices<pcl::PointNormal> extract;
-        pcl::PointCloud<pcl::PointNormal>::Ptr closepoints(new pcl::PointCloud<pcl::PointNormal>());
-        extract.setInputCloud (input_);
-        extract.setIndices (k_indices);
-        //extract.setNegative (true);
-        extract.filter (*closepoints);
+    bool estimateCylinderAroundPointIndex (int index, CableSlice& slice) /*{{{*/
+    {
+        if (index > input_->size()) {
+            PCL_ERROR("[%s:%d] invalid index: %d", __FILE__, __LINE__, index);
+            return false;
+        }
+        pcl::PointXYZ pt;
+        pt.x = input_->points[index].x;
+        pt.y = input_->points[index].y;
+        pt.z = input_->points[index].z;
+        pcl::PointIndices::Ptr k_indices = findClosePointsIndices(pt);
 
-
+        return estimateCylinderAroundPointsIndices(k_indices, slice);
+    } /*}}}*/
+    bool estimateCylinderAroundPointsIndices (pcl::PointIndices::Ptr pointsindices, CableSlice& slice, const Eigen::Vector3f& initialaxis = Eigen::Vector3f(), double eps_angle=0.0) /*{{{*/
+    {
         // Create the segmentation object
         pcl::SACSegmentationFromNormals<pcl::PointNormal, pcl::PointNormal> seg;
         pcl::PointIndices::Ptr cylinderinlierindices(new pcl::PointIndices());
-        pcl::ModelCoefficients::Ptr cylindercoeffs (new pcl::ModelCoefficients);
         // Optional
         seg.setOptimizeCoefficients (true);
         //seg.setAxis(...);
+        seg.setAxis (initialaxis);
+        seg.setEpsAngle(eps_angle);
         // Mandatory
         seg.setModelType (pcl::SACMODEL_CYLINDER);
         seg.setMethodType (pcl::SAC_RANSAC);
         //seg.setMethodType (pcl::SAC_RRANSAC);
         seg.setMaxIterations(10000);
         seg.setDistanceThreshold (distthreshold_cylindermodel_);
-        seg.setInputCloud (closepoints);
-        seg.setInputNormals (closepoints);
-        seg.segment (*cylinderinlierindices, *cylindercoeffs);
+        seg.setInputCloud (input_);
+        seg.setInputNormals (input_);
+        seg.setIndices(pointsindices);
+        seg.segment (*slice.indices, *slice.cylindercoeffs);
 
-        std::cerr << "cylinder Model cylindercoeffs: " << cylindercoeffs->values[0] << " "
-                  << cylindercoeffs->values[1] << " "
-                  << cylindercoeffs->values[2] << " "
-                  << cylindercoeffs->values[3] << " "
-                  << cylindercoeffs->values[4] << " "
-                  << cylindercoeffs->values[5] << " "
-                  << cylindercoeffs->values[6] << " " << std::endl;
+        std::cerr << "cylinder Model cylindercoeffs: " << slice.cylindercoeffs->values[0] << " "
+                  << slice.cylindercoeffs->values[1] << " "
+                  << slice.cylindercoeffs->values[2] << " "
+                  << slice.cylindercoeffs->values[3] << " "
+                  << slice.cylindercoeffs->values[4] << " "
+                  << slice.cylindercoeffs->values[5] << " "
+                  << slice.cylindercoeffs->values[6] << " " << std::endl;
+        return validateCableSlice(slice.cylindercoeffs);
+    } /*}}}*/
 
-        viewer_->removeShape("cylinder");
-        viewer_->addCylinder(*cylindercoeffs);
-
-        std::cout << "extract model" << std::endl;
-        pcl::PointCloud<pcl::PointNormal>::Ptr extractedpoints(new pcl::PointCloud<pcl::PointNormal>());
-        extract.setInputCloud (closepoints);
-        extract.setIndices (cylinderinlierindices);
-        //extract.setNegative (true);
-        extract.filter (*extractedpoints);
-        if (extractedpoints->points.size() > 0) {
-            pcl::io::savePCDFileBinaryCompressed ("extractedpoints.pcd", *extractedpoints);
+    bool validateCableSlice (pcl::ModelCoefficients::Ptr cylindercoeffs)/*{{{*/
+    {
+        PCL_INFO("[validateCableSlice] radius: %f, given: %f\n", cylindercoeffs->values[6], cableradius_);
+        if(cableradius_* 0.8 < cylindercoeffs->values[6] && cylindercoeffs->values[6] < cableradius_* 1.2 ) {
+            return true;
         }
-    }
-    void area_picking_callback (const pcl::visualization::AreaPickingEvent &event)/*{{{*/
+        return false;
+    }/*}}}*/
+
+    void area_picking_callback (const pcl::visualization::AreaPickingEvent &event) /*{{{*/
     {
         if (event.getPointsIndices (indices_->indices)) {
             std::cout << "picked " << indices_->indices.size () << std::endl;
@@ -137,12 +327,17 @@ public:
         //extract.setNegative (true);
         extract.filter (*extractedpoints);
         pcl::io::savePCDFileBinaryCompressed ("extractedpoints.pcd", *extractedpoints);
-    }/*}}}*/
-    typename pcl::PointCloud<pcl::PointNormal>::Ptr input_;
+    } /*}}}*/
+
+    pcl::PointCloud<pcl::PointNormal>::Ptr input_;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr points_;
     pcl::PointIndices::Ptr indices_;
     double distthreshold_cylindermodel_;
-    double searchradius_;
+    double cableradius_;
+    double cableslicelen_;
+    std::vector<Cable> cables_;
 
+    boost::mutex cables_mutex_;
     boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer_;
 
 };
@@ -162,7 +357,8 @@ int main (int argc, char** argv)
         ("removeplane", bpo::value<bool>()->default_value(false), "findplane or not?")
         ("voxelsize", bpo::value< double >(), "voxelsize")
         ("distthreshold_findplane", bpo::value< double >(), "distance threshold for finding plane")
-        ("cylindersurfacesearchradius", bpo::value< double >(), "")
+        ("cableradius", bpo::value< double >(), "cable radius")
+        ("cableslicelen", bpo::value< double >()->default_value(0), "length of cable slice")
         ("distthreshold_cylindermodel", bpo::value< double >(), "distance threshold for finding cylinder")
     ;
 
@@ -184,8 +380,12 @@ int main (int argc, char** argv)
     double voxelsize = opts["voxelsize"].as<double>();
     bool removeplane= opts["removeplane"].as<bool>();
     double distthreshold_findplane= opts["distthreshold_findplane"].as<double>();
-    double cylindersurfacesearchradius= opts["cylindersurfacesearchradius"].as<double>();
+    double cableradius = opts["cableradius"].as<double>();
+    double cableslicelen = opts["cableslicelen"].as<double>();
     double distthreshold_cylindermodel= opts["distthreshold_cylindermodel"].as<double>();
+    if (cableslicelen == 0.0) {
+        cableslicelen = cableradius*4.0;
+    }
 /*}}}*/
     std::cout << "loading pcd file..." << std::endl; /*{{{*/
     pcl::PointCloud<pcl::PointNormal>::Ptr cloud(new pcl::PointCloud<pcl::PointNormal>);
@@ -241,8 +441,9 @@ int main (int argc, char** argv)
     std::cout << "finished computing normals! size: " << cloud_normals->size() << std::endl;
 /*}}}*/
 
-    CableDetection cabledetection(cloud_normals, cylindersurfacesearchradius, distthreshold_cylindermodel);
-    //pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr colorcloud(new pcl::PointCloud<pcl::PointXYZRGBNormal>);
+    CableDetection cabledetection(cloud_normals, cableradius, cableslicelen, distthreshold_cylindermodel);
+    cabledetection.RunViewer();
+    //pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr colorcloud(new pcl::PointCloud<pcl::PointXYZRGBNormal>);/*{{{*/
     //pcl::copyPointCloud (*cloud_normals, *colorcloud);
     //for (size_t i = 0; i < colorcloud->size(); i++) {
     //colorcloud->points[i].r = 255.0;
@@ -254,6 +455,6 @@ int main (int argc, char** argv)
     //viewer.showCloud (colorcloud);
     //while (!viewer.wasStopped ())
     //{
-    //}
+    //}/*}}}*/
     return (0);
 }
