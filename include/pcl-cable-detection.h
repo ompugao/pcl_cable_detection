@@ -110,7 +110,7 @@ void computeCurvatureHistogram(const typename pcl::PointCloud<PointT>::Ptr cloud
 class CableDetection {
 public:
     class CableSlice {
-    public:
+public:
         //std::string name;
         pcl::ModelCoefficients::Ptr cylindercoeffs;
         pcl::PointIndices::Ptr cylinderindices;
@@ -130,10 +130,10 @@ public:
         }
         //copy constructor
         //CableSlice(const CableSlice& sliceorig) {
-            //cylindercoeffs = sliceorig.cylindercoeffs->;
-        //} 
+        //cylindercoeffs = sliceorig.cylindercoeffs->;
+        //}
         typedef boost::shared_ptr<CableSlice> Ptr;
-        typedef boost::shared_ptr<CableSlice const> ConstPtr ;
+        typedef boost::shared_ptr<CableSlice const> ConstPtr;
     };
     typedef boost::shared_ptr<CableSlice> CableSlicePtr;
     typedef boost::shared_ptr<CableSlice const> CableSliceConstPtr;
@@ -142,7 +142,7 @@ public:
     typedef std::list<CableSlicePtr> Cable;
 
     CableDetection(pcl::PointCloud<pcl::PointNormal>::Ptr input, double cableradius, double cableslicelen, double distthreshold_cylindermodel)
-        : tryfindingpointscounts_(3) 
+        : tryfindingpointscounts_(3)
     {
         input_ = input;
         // create pointcloud<pointxyz>
@@ -179,18 +179,18 @@ public:
     void keyboard_callback (const pcl::visualization::KeyboardEvent& event)
     {
         /*
-        std::cout << event.getKeySym() << std::endl;
-        if(event.getKeySym() == "i") {
+           std::cout << event.getKeySym() << std::endl;
+           if(event.getKeySym() == "i") {
             if (rendering_input_) {
-                viewer_->removePointCloud("inputcloud"); 
+                viewer_->removePointCloud("inputcloud");
                 rendering_input_ = false;
             }
             else {
                 viewer_->addPointCloud<pcl::PointNormal> (input_, "inputcloud");
                 rendering_input_ = true;
             }
-        }
-        */
+           }
+         */
     }
 
     void point_picking_callback (const pcl::visualization::PointPickingEvent& event)
@@ -200,32 +200,35 @@ public:
         //event.getPoint (pt.x, pt.y, pt.z);
         size_t idx = event.getPointIndex ();
         std::cout << "picking point index: " << idx << std::endl;
-        //cables_.resize(cables_.size()+1);
-        //Cable& cable = cables_[cables_.size()];
-        Cable cable;
 
-        pcl::PointIndices::Ptr k_indices;
         pcl::PointXYZ selectedpoint;
         selectedpoint.x = input_->points[idx].x;
         selectedpoint.y = input_->points[idx].y;
         selectedpoint.z = input_->points[idx].z;
-        k_indices = findClosePointsIndices(selectedpoint);
+        Cable cable = findCableFromPoint(selectedpoint);
+        visualizeCable(cable);
+    }
+
+    Cable findCableFromPoint(pcl::PointXYZ point) {/*{{{*/
+        pcl::PointIndices::Ptr k_indices;
+        k_indices = findClosePointsIndices(point);
         pcl::PointXYZ pt;
 
+        Cable cable;
         CableSlicePtr slice, oldslice, baseslice;
         slice.reset(new CableSlice());
         oldslice.reset(new CableSlice());
         bool cableslicefound = estimateCylinderAroundPointsIndices(k_indices, *slice);
         if (!cableslicefound) {
             PCL_INFO("[first search] no valid slice found\n");
-            return;
+            return cable;
         }
         oldslice = slice; baseslice = slice;
         std::cout << "first slice found!" << std::endl;
         cable.push_back(slice);
 
         // search forward
-        for(size_t iteration=0;;iteration++) {
+        for(size_t iteration=0;; iteration++) {
             int tryindex = tryfindingpointscounts_;
             pt.x = oldslice->cylindercoeffs->values[0];
             pt.y = oldslice->cylindercoeffs->values[1];
@@ -269,7 +272,7 @@ public:
                 break;
             }
             Eigen::Vector3f estimated_cylinder_axis(slice->cylindercoeffs->values[3],slice->cylindercoeffs->values[4],slice->cylindercoeffs->values[5]);
-            if (initialaxis.dot(estimated_cylinder_axis) < 0 ){
+            if (initialaxis.dot(estimated_cylinder_axis) < 0 ) {
                 slice->cylindercoeffs->values[3] = -slice->cylindercoeffs->values[3];
                 slice->cylindercoeffs->values[4] = -slice->cylindercoeffs->values[4];
                 slice->cylindercoeffs->values[5] = -slice->cylindercoeffs->values[5];
@@ -280,7 +283,7 @@ public:
 
         oldslice = baseslice;
         // search backward
-        for(size_t iteration=0;;iteration++) {
+        for(size_t iteration=0;; iteration++) {
             int tryindex = tryfindingpointscounts_;
             pt.x = oldslice->cylindercoeffs->values[0];
             pt.y = oldslice->cylindercoeffs->values[1];
@@ -324,7 +327,7 @@ public:
                 break;
             }
             Eigen::Vector3f estimated_cylinder_axis(slice->cylindercoeffs->values[3],slice->cylindercoeffs->values[4],slice->cylindercoeffs->values[5]);
-            if (initialaxis.dot(estimated_cylinder_axis) < 0 ){
+            if (initialaxis.dot(estimated_cylinder_axis) < 0 ) {
                 slice->cylindercoeffs->values[3] = -slice->cylindercoeffs->values[3];
                 slice->cylindercoeffs->values[4] = -slice->cylindercoeffs->values[4];
                 slice->cylindercoeffs->values[5] = -slice->cylindercoeffs->values[5];
@@ -333,10 +336,10 @@ public:
             oldslice = slice;
         }
 
+        return cable;
+    }/*}}}*/
 
-        /*
-         * visualize cable
-         */
+    void visualizeCable(Cable& cable) {/*{{{*/
         viewer_->removeAllShapes();
         size_t sliceindex = 0;
         for (std::list<CableSlicePtr>::iterator itr = cable.begin(); itr != cable.end(); ++itr, ++sliceindex) {
@@ -357,9 +360,9 @@ public:
 
             viewer_->removeShape(cylindername);
             //viewer_->addLine(pt0, pt1,(sliceindex%3==0?1:0),((sliceindex+1)%3==0?1:0),((sliceindex+2)%3==0?1:0), cylindername);
-            int r = (sliceindex%3==0?1:0);
-            int g = ((sliceindex+1)%3==0?1:0);
-            int b = ((sliceindex+2)%3==0?1:0);
+            int r = (sliceindex%3==0 ? 1 : 0);
+            int g = ((sliceindex+1)%3==0 ? 1 : 0);
+            int b = ((sliceindex+2)%3==0 ? 1 : 0);
             viewer_->addArrow(pt0, pt1, r, g, b, false, cylindername);
 
             pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr extractedpoints(new pcl::PointCloud<pcl::PointXYZRGBNormal>());
@@ -378,7 +381,7 @@ public:
             //pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZRGBNormal> rgbfield(extractedpoints, r*255, g*255, b*255);
             viewer_->addPointCloud<pcl::PointXYZRGBNormal> (extractedpoints, rgbfield, slicepointsid.str());
             viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, slicepointsid.str());
-            //viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_COLOR, 0.0,0.0,1.0, "sample cloud_2"); 
+            //viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_COLOR, 0.0,0.0,1.0, "sample cloud_2");
             //viewer_->addPointCloud(extractedpoints, slicepointsid.str());
             ////const std::string slicepointsidstr = slicepointsid.str();
             ////viewer_->addPointCloudNormals (extractedpoints, 100, 0.002f, slicepointsidstr,0);
@@ -393,38 +396,12 @@ public:
             viewer_->addText3D (textss.str(), pt0, 0.001);
         }
 
-        /*{{{*/
-        /*
-        for (std::list<CableSlicePtr>::iterator itr = cable.begin(); itr != cable.end(); ++itr, ++sliceindex) {
-            std::stringstream ss;
-            ss << "cylinder_" << sliceindex;
-            std::string cylindername = ss.str();
-            //viewer_->addCylinder(*cylindercoeffs);
-            pcl::PointXYZ pt0, pt1, pt2;
-            pt0.x = (*itr)->cylindercoeffs->values[0];
-            pt0.y = (*itr)->cylindercoeffs->values[1];
-            pt0.z = (*itr)->cylindercoeffs->values[2];
-            pt1.x = (*itr)->cylindercoeffs->values[0] + (*itr)->cylindercoeffs->values[3]*cableslicelen_/2;
-            pt1.y = (*itr)->cylindercoeffs->values[1] + (*itr)->cylindercoeffs->values[4]*cableslicelen_/2;
-            pt1.z = (*itr)->cylindercoeffs->values[2] + (*itr)->cylindercoeffs->values[5]*cableslicelen_/2;
-            pt2.x = (*itr)->cylindercoeffs->values[0] - (*itr)->cylindercoeffs->values[3]*cableslicelen_/2;
-            pt2.y = (*itr)->cylindercoeffs->values[1] - (*itr)->cylindercoeffs->values[4]*cableslicelen_/2;
-            pt2.z = (*itr)->cylindercoeffs->values[2] - (*itr)->cylindercoeffs->values[5]*cableslicelen_/2;
-            viewer_->removeShape(cylindername);
-            viewer_->addArrow(pt1, pt2,(sliceindex%3==0?1:0),((sliceindex+1)%3==0?1:0),((sliceindex+2)%3==0?1:0), false, cylindername);
-            std::stringstream textss;
-            textss << "slice_" << sliceindex;
-            viewer_->addText3D (textss.str(), pt0, 0.001);
-        }
-        */
-        /*}}}*/
-
         //if (extractedpoints->points.size() > 0) {
         //    pcl::io::savePCDFileBinaryCompressed ("extractedpoints.pcd", *extractedpoints);
         //}
-    }
+    }/*}}}*/
 
-    pcl::PointIndices::Ptr findClosePointsIndices(pcl::PointXYZ pt, double radius = 0) {/*{{{*/
+    pcl::PointIndices::Ptr findClosePointsIndices(pcl::PointXYZ pt, double radius = 0) { /*{{{*/
         if (radius == 0) {
             radius = cableradius_*2;
         }
@@ -435,7 +412,7 @@ public:
         tree->setInputCloud(points_);
         tree->radiusSearch (pt, radius, k_indices->indices, k_sqr_distances);
         return k_indices;
-    }/*}}}*/
+    } /*}}}*/
 
     bool estimateCylinderAroundPointsIndices (pcl::PointIndices::Ptr pointsindices, CableSlice& slice, pcl::PointXYZ centerpt = pcl::PointXYZ(), const Eigen::Vector3f& initialaxis = Eigen::Vector3f(), double eps_angle=0.0) /*{{{*/
     {
@@ -461,9 +438,9 @@ public:
             // fix the center of the slice
             Eigen::Vector3f pos(slice.cylindercoeffs->values[0],slice.cylindercoeffs->values[1],slice.cylindercoeffs->values[2]);
             Eigen::Vector3f w(centerpt.x - slice.cylindercoeffs->values[0], centerpt.y - slice.cylindercoeffs->values[1], centerpt.z - slice.cylindercoeffs->values[2]);
-            Eigen::Vector3f dir(slice.cylindercoeffs->values[3],slice.cylindercoeffs->values[4],slice.cylindercoeffs->values[5]);//dir should be normalized
+            Eigen::Vector3f dir(slice.cylindercoeffs->values[3],slice.cylindercoeffs->values[4],slice.cylindercoeffs->values[5]); //dir should be normalized
             //orthogonal projection to the line
-            Eigen::Vector3f newpos = pos + w.dot(dir) * dir; 
+            Eigen::Vector3f newpos = pos + w.dot(dir) * dir;
 
             slice.cylindercoeffs->values[0] = newpos[0];
             slice.cylindercoeffs->values[1] = newpos[1];
@@ -482,14 +459,14 @@ public:
         return validateCableSlice(slice.cylindercoeffs);
     } /*}}}*/
 
-    bool validateCableSlice (pcl::ModelCoefficients::Ptr cylindercoeffs)/*{{{*/
+    bool validateCableSlice (pcl::ModelCoefficients::Ptr cylindercoeffs) /*{{{*/
     {
         PCL_INFO("[validateCableSlice] radius: %f, given: %f\n", cylindercoeffs->values[6], cableradius_);
         if(cableradius_* 0.7 < cylindercoeffs->values[6] && cylindercoeffs->values[6] < cableradius_* 1.3 ) {
             return true;
         }
         return false;
-    }/*}}}*/
+    } /*}}}*/
 
     void area_picking_callback (const pcl::visualization::AreaPickingEvent &event) /*{{{*/
     {
