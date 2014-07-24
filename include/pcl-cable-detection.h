@@ -107,6 +107,7 @@ void computeCurvatureHistogram(const typename pcl::PointCloud<PointT>::Ptr cloud
     }
 }
 
+template <typename PointNT>
 class CableDetection {
 public:
     class CableSlice {
@@ -141,7 +142,9 @@ public:
     //typedef std::list<CableSlice> Cable;
     typedef std::list<CableSlicePtr> Cable;
 
-    CableDetection(pcl::PointCloud<pcl::PointNormal>::Ptr input, double cableradius, double cableslicelen, double distthreshold_cylindermodel)
+    typedef typename pcl::PointCloud<PointNT> PointCloudInput;
+    typedef typename pcl::PointCloud<PointNT>::Ptr PointCloudInputPtr;
+    CableDetection(PointCloudInputPtr input, double cableradius, double cableslicelen, double distthreshold_cylindermodel)
         : tryfindingpointscounts_(3)
     {
         input_ = input;
@@ -163,7 +166,7 @@ public:
         distthreshold_cylindermodel_ = distthreshold_cylindermodel;
         viewer_.reset(new pcl::visualization::PCLVisualizer("PCL viewer_"));
         viewer_->setBackgroundColor (0.0, 0.0, 0.0);
-        viewer_->addPointCloud<pcl::PointNormal> (input_, "inputcloud");
+        viewer_->addPointCloud<PointNT> (input_, "inputcloud");
         //viewer_->registerAreaPickingCallback(boost::bind(&CableDetection::area_picking_callback, this,_1));
         viewer_->registerPointPickingCallback(boost::bind(&CableDetection::point_picking_callback, this, _1));
         viewer_->registerKeyboardCallback(boost::bind(&CableDetection::keyboard_callback, this, _1));
@@ -342,7 +345,7 @@ public:
     void visualizeCable(Cable& cable) {/*{{{*/
         viewer_->removeAllShapes();
         size_t sliceindex = 0;
-        for (std::list<CableSlicePtr>::iterator itr = cable.begin(); itr != cable.end(); ++itr, ++sliceindex) {
+        for (typename std::list<CableSlicePtr>::iterator itr = cable.begin(); itr != cable.end(); ++itr, ++sliceindex) {
             if (sliceindex == cable.size()-1) {
                 break;
             }
@@ -417,7 +420,7 @@ public:
     bool estimateCylinderAroundPointsIndices (pcl::PointIndices::Ptr pointsindices, CableSlice& slice, pcl::PointXYZ centerpt = pcl::PointXYZ(), const Eigen::Vector3f& initialaxis = Eigen::Vector3f(), double eps_angle=0.0) /*{{{*/
     {
         // Create the segmentation object
-        pcl::SACSegmentationFromNormals<pcl::PointNormal, pcl::PointNormal> seg;
+        pcl::SACSegmentationFromNormals<PointNT, PointNT> seg;
         pcl::PointIndices::Ptr cylinderinlierindices(new pcl::PointIndices());
         // Optional
         seg.setOptimizeCoefficients (true);
@@ -477,7 +480,7 @@ public:
         }
 
         // Create the segmentation object
-        pcl::SACSegmentationFromNormals<pcl::PointNormal, pcl::PointNormal> seg;
+        pcl::SACSegmentationFromNormals<PointNT, PointNT> seg;
         pcl::PointIndices::Ptr cylinderinlierindices;
         pcl::ModelCoefficients::Ptr cylindercoeffs (new pcl::ModelCoefficients);
         // Optional
@@ -504,8 +507,8 @@ public:
         viewer_->addCylinder(*cylindercoeffs);
 
         std::cout << "extract model" << std::endl;
-        pcl::ExtractIndices<pcl::PointNormal> extract;
-        pcl::PointCloud<pcl::PointNormal>::Ptr extractedpoints(new pcl::PointCloud<pcl::PointNormal>());
+        pcl::ExtractIndices<PointNT> extract;
+        PointCloudInputPtr extractedpoints(new PointCloudInput());
         extract.setInputCloud (input_);
         extract.setIndices (cylinderinlierindices);
         //extract.setNegative (true);
@@ -513,7 +516,7 @@ public:
         pcl::io::savePCDFileBinaryCompressed ("extractedpoints.pcd", *extractedpoints);
     } /*}}}*/
 
-    pcl::PointCloud<pcl::PointNormal>::Ptr input_;
+    PointCloudInputPtr input_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr points_;
     pcl::PointIndices::Ptr indices_;
     double distthreshold_cylindermodel_;

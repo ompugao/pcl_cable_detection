@@ -105,7 +105,7 @@ int main (int argc, char** argv)
     std::cout << "finished computing normals! size: " << cloud_normals->size() << std::endl;
 /*}}}*/
 
-    CableDetection cabledetection(cloud_normals, cableradius, cableslicelen, distthreshold_cylindermodel);
+    CableDetection<pcl::PointNormal> cabledetection(cloud_normals, cableradius, cableslicelen, distthreshold_cylindermodel);
     cabledetection.RunViewer();
     //pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr colorcloud(new pcl::PointCloud<pcl::PointXYZRGBNormal>);/*{{{*/
     //pcl::copyPointCloud (*cloud_normals, *colorcloud);
