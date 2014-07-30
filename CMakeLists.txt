@@ -205,7 +205,8 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/config.h.in ${CMAKE_CURRENT_BINARY_DI
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
 
-file(GLOB PCL_CABLE_DETECTION_HEADER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/include/pcl-cable-detection/*.h)
+file(GLOB PCL_CABLE_DETECTION_HEADER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h ${CMAKE_CURRENT_SOURCE_DIR}/include/pcl-cable-detection/*.h)
+message("${PCL_CABLE_DETECTION_HEADER_FILES}")
 install(FILES ${PCL_CABLE_DETECTION_HEADER_FILES} ${CMAKE_CURRENT_BINARY_DIR}/include/pcl-cable-detection/config.h DESTINATION include/pcl-cable-detection)
 
 
