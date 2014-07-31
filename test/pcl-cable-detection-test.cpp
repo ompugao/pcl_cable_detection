@@ -3,6 +3,7 @@
 #include <boost/lexical_cast.hpp>
 #include <boost/utility.hpp>
 #include "pcl-cable-detection.h"
+#include <pcl/io/ply_io.h>
 #include <sstream>
 
 using namespace pcl_cable_detection;
@@ -17,13 +18,13 @@ int main (int argc, char** argv)
 
     opts_desc.add_options()
         ("input_file", bpo::value< std::string >(), "Input data.")
-        ("output_file", bpo::value< std::string >(), "output data.")
         ("removeplane", bpo::value<bool>()->default_value(false), "findplane or not?")
         ("voxelsize", bpo::value< double >(), "voxelsize")
         ("distthreshold_findplane", bpo::value< double >(), "distance threshold for finding plane")
         ("cableradius", bpo::value< double >(), "cable radius")
-        ("cableslicelen", bpo::value< double >()->default_value(0), "length of cable slice")
         ("distthreshold_cylindermodel", bpo::value< double >(), "distance threshold for finding cylinder")
+        ("scenesamplingradius", bpo::value< double >(), "scene sampling radius")
+        ("cableterminalply", bpo::value< std::string >(), "path to terminal ply file")
     ;
 
     bpo::variables_map opts;
@@ -39,17 +40,14 @@ int main (int argc, char** argv)
     }
 
     std::string input_file = opts["input_file"].as<std::string> ();
-    std::string output_file = opts["output_file"].as<std::string> ();
 
     double voxelsize = opts["voxelsize"].as<double>();
     bool removeplane= opts["removeplane"].as<bool>();
     double distthreshold_findplane= opts["distthreshold_findplane"].as<double>();
     double cableradius = opts["cableradius"].as<double>();
-    double cableslicelen = opts["cableslicelen"].as<double>();
     double distthreshold_cylindermodel= opts["distthreshold_cylindermodel"].as<double>();
-    if (cableslicelen == 0.0) {
-        cableslicelen = cableradius*4.0;
-    }
+    double scenesamplingradius = opts["scenesamplingradius"].as<double>();
+    std::string cableterminalply = opts["cableterminalply"].as<std::string>();
 /*}}}*/
     std::cout << "loading pcd file..." << std::endl; /*{{{*/
     pcl::PointCloud<pcl::PointNormal>::Ptr cloud(new pcl::PointCloud<pcl::PointNormal>);
@@ -105,7 +103,16 @@ int main (int argc, char** argv)
     std::cout << "finished computing normals! size: " << cloud_normals->size() << std::endl;
 /*}}}*/
 
-    CableDetection<pcl::PointNormal> cabledetection(cloud_normals, cableradius, cableslicelen, distthreshold_cylindermodel);
+    pcl::PointCloud<pcl::PointNormal>::Ptr terminalcloud(new pcl::PointCloud<pcl::PointNormal>());
+    pcl::io::loadPLYFile(cableterminalply, *terminalcloud);
+    Eigen::Vector3f axis(0,-1,0);
+
+    CableDetection<pcl::PointNormal> cabledetection(terminalcloud, axis);
+
+    cabledetection.setCableRadius(cableradius);
+    cabledetection.setThresholdCylinderModel(distthreshold_cylindermodel);
+    cabledetection.setSceneSamplingRadius(scenesamplingradius);
+    cabledetection.setInputCloud(cloud_normals);
     cabledetection.RunViewer();
     //pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr colorcloud(new pcl::PointCloud<pcl::PointXYZRGBNormal>);/*{{{*/
     //pcl::copyPointCloud (*cloud_normals, *colorcloud);

@@ -1,9 +1,14 @@
 #ifndef __PCL_CABLE_DETECTION__
 #define __PCL_CABLE_DETECTION__
 
+#include <boost/random.hpp>
 #include <pcl/ModelCoefficients.h>
+#include <pcl/common/centroid.h>
+#include <pcl/common/eigen.h>
 #include <pcl/common/io.h>
+#include <pcl/common/time.h>
 #include <pcl/console/print.h>
+#include <pcl/features/fpfh_omp.h>
 #include <pcl/features/normal_3d.h>
 #include <pcl/features/normal_3d_omp.h>
 #include <pcl/filters/extract_indices.h>
@@ -11,8 +16,11 @@
 #include <pcl/io/pcd_io.h>
 #include <pcl/kdtree/kdtree.h>
 #include <pcl/kdtree/kdtree_flann.h>
+#include <pcl/keypoints/uniform_sampling.h>
 #include <pcl/pcl_base.h>
 #include <pcl/point_types.h>
+#include <pcl/registration/icp.h>
+#include <pcl/registration/sample_consensus_prerejective.h>
 #include <pcl/sample_consensus/method_types.h>
 #include <pcl/sample_consensus/model_types.h>
 #include <pcl/search/pcl_search.h>
@@ -21,6 +29,8 @@
 #include <algorithm> //copy
 #include <iterator> //back_inserter
 #include <cstdlib> //random
+#include <cmath>
+#include <vtkTransform.h>
 
 namespace pcl_cable_detection {
 
@@ -110,12 +120,17 @@ void computeCurvatureHistogram(const typename pcl::PointCloud<PointT>::Ptr cloud
 template <typename PointNT>
 class CableDetection {
 public:
+    class CableTerminal;
+    typedef boost::shared_ptr<CableTerminal> CableTerminalPtr;
+    typedef boost::shared_ptr<CableTerminal const> CableTerminalConstPtr;
+
     class CableSlice {
 public:
         //std::string name;
         pcl::ModelCoefficients::Ptr cylindercoeffs;
         pcl::PointIndices::Ptr cylinderindices;
         pcl::PointIndices::Ptr searchedindices;
+        CableTerminalPtr cableterminal;
 
         pcl::PointXYZ centerpt_;
 
@@ -142,15 +157,51 @@ public:
     //typedef std::list<CableSlice> Cable;
     typedef std::list<CableSlicePtr> Cable;
 
+    class CableTerminal {
+public:
+        Eigen::Matrix4f transform;
+
+        CableTerminal() {
+        }
+        virtual ~CableTerminal(){
+        }
+
+        typedef boost::shared_ptr<CableSlice> Ptr;
+        typedef boost::shared_ptr<CableSlice const> ConstPtr;
+public:
+        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    };
+
+
+
     typedef typename pcl::PointCloud<PointNT> PointCloudInput;
     typedef typename pcl::PointCloud<PointNT>::Ptr PointCloudInputPtr;
-    CableDetection(PointCloudInputPtr input, double cableradius, double cableslicelen, double distthreshold_cylindermodel)
+    typedef pcl::FPFHSignature33 FeatureT;
+    typedef pcl::FPFHEstimationOMP<PointNT,PointNT,FeatureT> FeatureEstimationT;
+    typedef pcl::PointCloud<FeatureT> FeatureCloudT;
+
+    CableDetection(PointCloudInputPtr terminalcloud, Eigen::Vector3f terminalaxis)
         : tryfindingpointscounts_(3)
+    {
+        cableradius_ = 0;
+        distthreshold_cylindermodel_ = 0;
+        scenesampling_radius_ = 0;
+
+        // compute the bounding cylinder of the terminal
+        terminalcloud_ = terminalcloud;
+        terminalcylindercoeffs_.reset(new pcl::ModelCoefficients());
+        computeBoundingCylinder(terminalcloud_, terminalaxis, terminalcylindercoeffs_);
+    }
+
+    void setInputCloud(PointCloudInputPtr input)
     {
         input_ = input;
         // create pointcloud<pointxyz>
         points_.reset(new pcl::PointCloud<pcl::PointXYZ>());
         pcl::copyPointCloud(*input_, *points_);
+        // setup kdtree
+        kdtree_.reset(new pcl::KdTreeFLANN<pcl::PointXYZ>());
+        kdtree_->setInputCloud(points_);
 
         // Set up the full indices set
         // NOTE: do not remove points from input_
@@ -161,42 +212,89 @@ public:
         for (int fii = 0; fii < static_cast<int> (indices_->indices.size ()); ++fii) {  // fii = full indices iterator
             indices_->indices[fii] = fii;
         }
+
+    }
+
+    void setCableRadius(double cableradius) {
         cableradius_ = cableradius;
-        cableslicelen_ = cableslicelen;
+        cableslicelen_ = 4 * cableradius_;
+    }
+    void setThresholdCylinderModel(double distthreshold_cylindermodel) {
         distthreshold_cylindermodel_ = distthreshold_cylindermodel;
+    }
+    void setSceneSamplingRadius(double scenesampling_radius) {
+        scenesampling_radius_ = scenesampling_radius;
+    }
+
+    void RunViewerBackGround(){ /*{{{*/
+        if(!viewer_) {
+            viewerthread_.reset(new boost::thread(boost::bind(&CableDetection::RunViewer, this)));
+        }
+    }/*}}}*/
+
+    void RunViewer(){ /*{{{*/
         viewer_.reset(new pcl::visualization::PCLVisualizer("PCL viewer_"));
         viewer_->setBackgroundColor (0.0, 0.0, 0.0);
         viewer_->addPointCloud<PointNT> (input_, "inputcloud");
+        viewer_->addCoordinateSystem(0.5);
         //viewer_->registerAreaPickingCallback(boost::bind(&CableDetection::area_picking_callback, this,_1));
         viewer_->registerPointPickingCallback(boost::bind(&CableDetection::point_picking_callback, this, _1));
         viewer_->registerKeyboardCallback(boost::bind(&CableDetection::keyboard_callback, this, _1));
-    }
-
-    void RunViewer(){
+        std::vector<Cable> cables;
+        {
+            pcl::ScopeTime t("findCables");
+            findCables(cables);
+        }
+        int i = 0;
+        for (typename std::vector<Cable>::iterator itr = cables.begin(); itr != cables.end(); itr++ , i++) {
+            std::stringstream ss;
+            ss << "cable" << i << "_";
+            visualizeCable(*itr, ss.str());
+            viewer_->spinOnce ();
+        }
+        std::cout << "found " << cables.size() << " cables"<< std::endl;
         while (!viewer_->wasStopped ())
         {
             viewer_->spinOnce ();
         }
-    }
+    } /*}}}*/
 
-    void keyboard_callback (const pcl::visualization::KeyboardEvent& event)
-    {
-        /*
-           std::cout << event.getKeySym() << std::endl;
-           if(event.getKeySym() == "i") {
-            if (rendering_input_) {
-                viewer_->removePointCloud("inputcloud");
-                rendering_input_ = false;
-            }
-            else {
-                viewer_->addPointCloud<pcl::PointNormal> (input_, "inputcloud");
-                rendering_input_ = true;
-            }
-           }
-         */
-    }
+    /*
+     * param[in] cloud: model cloud
+     * param[in] axis: bounding cylinder axis of the model
+     * param[out] cylindercoeffs: the extended cylinder model coefficients
+     */
+    void computeBoundingCylinder(PointCloudInputPtr cloud, Eigen::Vector3f axis, pcl::ModelCoefficients::Ptr cylindercoeffs) { /*{{{*/
+        cylindercoeffs->values.resize(9);
+        cylindercoeffs->values[0] = cylindercoeffs->values[1] = cylindercoeffs->values[2] = 0.0;
+        axis.normalize();
+        cylindercoeffs->values[3] = axis[0];
+        cylindercoeffs->values[4] = axis[1];
+        cylindercoeffs->values[5] = axis[2];
 
-    void point_picking_callback (const pcl::visualization::PointPickingEvent& event)
+        double square_r = 0;
+        double upperheight = 0;
+        double lowerheight = std::numeric_limits<float>::max();
+        for (size_t i = 0; i < terminalcloud_->points.size(); i++) {
+            PointNT& pt = terminalcloud_->points[i];
+            Eigen::Vector3f p(pt.x, pt.y, pt.z);
+            double cos = p.dot(axis);
+            Eigen::Vector3f projected_p = cos * axis;
+            double tmp_height = projected_p.norm();
+            double tmp_square_r = (p - projected_p).squaredNorm();
+            if (square_r < tmp_square_r) { square_r = tmp_square_r; }
+            if (cos > 0) {
+                if (upperheight < tmp_height) { upperheight = tmp_height; }
+            } else {
+                if (lowerheight > -tmp_height) { lowerheight = -tmp_height; }
+            }
+        }
+        cylindercoeffs->values[6] = std::sqrt(square_r);
+        cylindercoeffs->values[7] = upperheight;
+        cylindercoeffs->values[8] = lowerheight;
+    } /*}}}*/
+
+    void point_picking_callback (const pcl::visualization::PointPickingEvent& event) /*{{{*/
     {
         boost::mutex::scoped_lock lock(cables_mutex_);
         //pcl::PointXYZ pt;
@@ -209,10 +307,64 @@ public:
         selectedpoint.y = input_->points[idx].y;
         selectedpoint.z = input_->points[idx].z;
         Cable cable = findCableFromPoint(selectedpoint);
+        viewer_->removeAllShapes();
         visualizeCable(cable);
+        //findCableTerminal(cable, 0.027);
+        findCableTerminal(cable, 0.018);
+    } /*}}}*/
+
+    void findCables(std::vector<Cable>& cables)
+    {
+        pcl::PointCloud<int> sampled_indices;
+        pcl::UniformSampling<PointNT> uniform_sampling;
+        uniform_sampling.setInputCloud (input_);
+        uniform_sampling.setRadiusSearch (scenesampling_radius_);
+        uniform_sampling.compute (sampled_indices);
+        PointCloudInputPtr sampledpoints(new PointCloudInput);
+        pcl::copyPointCloud (*input_, sampled_indices.points, *sampledpoints);
+        if (!!viewer_) {
+            viewer_->removePointCloud ("sampledpoints");
+            pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(sampledpoints, 255, 128, 128);
+            viewer_->addPointCloud<PointNT> (sampledpoints, rgbfield,  "sampledpoints");
+            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "sampledpoints");
+        }
+
+        for (size_t isample = 0; isample < sampled_indices.points.size(); isample++) {
+            bool alreadyscanned = false;
+
+            // check if the sampled point is already found or not.
+            {
+            pcl::ScopeTime t("<----> sampled point is already found? <---->");
+            pcl::PointIndices::Ptr indicesaround = findClosePointsIndices(points_->points[isample]);
+            for (std::vector<int>::iterator i = indicesaround->indices.begin(); i != indicesaround->indices.end(); i++) {
+                for (typename std::vector<Cable>::iterator itr = cables.begin(); itr != cables.end(); itr++) {
+                    for (typename std::list<CableSlicePtr>::iterator sliceitr = (*itr).begin(); sliceitr!= (*itr).end(); ++sliceitr) {
+                        std::vector<int>::iterator founditr 
+                            = std::find( (*sliceitr)->searchedindices->indices.begin(), (*sliceitr)->searchedindices->indices.end() , (*i) );
+                        if ( founditr !=(*sliceitr)->searchedindices->indices.end() ) {
+                            alreadyscanned = true;
+                            break;
+                        }
+                        //std::vector<int>::iterator founditr 
+                            //= std::find( (*sliceitr)->searchedindices->indices.begin(), (*sliceitr)->searchedindices->indices.end() , (*i) );
+                        //if ( founditr !=(*sliceitr)->searchedindices->indices.end() ) {
+                            //alreadyscanned = true;
+                            //break;
+                        //}
+                    }
+                }
+            }
+            }
+            if (not alreadyscanned) {
+                Cable cable = findCableFromPoint(points_->points[isample]);
+                if(cable.size() > 0) {
+                    cables.push_back(cable);
+                }
+            }
+        }
     }
 
-    Cable findCableFromPoint(pcl::PointXYZ point) {/*{{{*/
+    Cable findCableFromPoint(pcl::PointXYZ point) { /*{{{*/
         pcl::PointIndices::Ptr k_indices;
         k_indices = findClosePointsIndices(point);
         pcl::PointXYZ pt;
@@ -270,8 +422,8 @@ public:
             if (!cableslicefound) {
                 PCL_INFO("[forward search]: no valid slice found (itr:%d)\n", iteration);
                 //NOTE: for debug
-                std::copy(k_indices->indices.begin(), k_indices->indices.end(), std::back_inserter(slice->searchedindices->indices));
-                cable.push_front(slice);
+                //std::copy(k_indices->indices.begin(), k_indices->indices.end(), std::back_inserter(slice->searchedindices->indices));
+                //cable.push_front(slice);
                 break;
             }
             Eigen::Vector3f estimated_cylinder_axis(slice->cylindercoeffs->values[3],slice->cylindercoeffs->values[4],slice->cylindercoeffs->values[5]);
@@ -325,8 +477,8 @@ public:
             if (!cableslicefound) {
                 PCL_INFO("[backward search]: no valid slice found (itr:%d)\n", iteration);
                 //NOTE: for debug
-                std::copy(k_indices->indices.begin(), k_indices->indices.end(), std::back_inserter(slice->searchedindices->indices));
-                cable.push_back(slice);
+                //std::copy(k_indices->indices.begin(), k_indices->indices.end(), std::back_inserter(slice->searchedindices->indices));
+                //cable.push_back(slice);
                 break;
             }
             Eigen::Vector3f estimated_cylinder_axis(slice->cylindercoeffs->values[3],slice->cylindercoeffs->values[4],slice->cylindercoeffs->values[5]);
@@ -340,17 +492,16 @@ public:
         }
 
         return cable;
-    }/*}}}*/
+    } /*}}}*/
 
-    void visualizeCable(Cable& cable) {/*{{{*/
-        viewer_->removeAllShapes();
+    void visualizeCable(Cable& cable, std::string namesuffix = "") { /*{{{*/
         size_t sliceindex = 0;
         for (typename std::list<CableSlicePtr>::iterator itr = cable.begin(); itr != cable.end(); ++itr, ++sliceindex) {
             if (sliceindex == cable.size()-1) {
                 break;
             }
             std::stringstream ss;
-            ss << "cylinder_" << sliceindex;
+            ss << namesuffix << "cylinder_" << sliceindex;
             std::string cylindername = ss.str();
             //viewer_->addCylinder(*cylindercoeffs);
             pcl::PointXYZ pt0, pt1;
@@ -361,11 +512,20 @@ public:
             pt1.y = (*boost::next(itr))->cylindercoeffs->values[1];
             pt1.z = (*boost::next(itr))->cylindercoeffs->values[2];
 
-            viewer_->removeShape(cylindername);
+            //viewer_->removeShape(cylindername);
             //viewer_->addLine(pt0, pt1,(sliceindex%3==0?1:0),((sliceindex+1)%3==0?1:0),((sliceindex+2)%3==0?1:0), cylindername);
             int r = (sliceindex%3==0 ? 1 : 0);
             int g = ((sliceindex+1)%3==0 ? 1 : 0);
             int b = ((sliceindex+2)%3==0 ? 1 : 0);
+            //viewer_->addArrow(pt0, pt1, r, g, b, false, cylindername);
+
+            pt0.x = (*itr)->cylindercoeffs->values[0];
+            pt0.y = (*itr)->cylindercoeffs->values[1];
+            pt0.z = (*itr)->cylindercoeffs->values[2];
+            pt1.x = (*itr)->cylindercoeffs->values[0] + (*itr)->cylindercoeffs->values[3]*0.001;
+            pt1.y = (*itr)->cylindercoeffs->values[1] + (*itr)->cylindercoeffs->values[4]*0.001;
+            pt1.z = (*itr)->cylindercoeffs->values[2] + (*itr)->cylindercoeffs->values[5]*0.001;
+
             viewer_->addArrow(pt0, pt1, r, g, b, false, cylindername);
 
             pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr extractedpoints(new pcl::PointCloud<pcl::PointXYZRGBNormal>());
@@ -378,30 +538,348 @@ public:
 
 
             std::stringstream slicepointsid;
-            slicepointsid << "slicepoints_" << sliceindex;
-            viewer_->removePointCloud(slicepointsid.str());
-            pcl::visualization::PointCloudColorHandlerRGBField<pcl::PointXYZRGBNormal> rgbfield(extractedpoints);
+            slicepointsid <<namesuffix<< "slicepoints_" << sliceindex;
+            //viewer_->removePointCloud(slicepointsid.str());
+            //pcl::visualization::PointCloudColorHandlerRGBField<pcl::PointXYZRGBNormal> rgbfield(extractedpoints);
             //pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZRGBNormal> rgbfield(extractedpoints, r*255, g*255, b*255);
-            viewer_->addPointCloud<pcl::PointXYZRGBNormal> (extractedpoints, rgbfield, slicepointsid.str());
-            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, slicepointsid.str());
+            //viewer_->addPointCloud<pcl::PointXYZRGBNormal> (extractedpoints, rgbfield, slicepointsid.str());
+            //viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, slicepointsid.str());
+
             //viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_COLOR, 0.0,0.0,1.0, "sample cloud_2");
             //viewer_->addPointCloud(extractedpoints, slicepointsid.str());
             ////const std::string slicepointsidstr = slicepointsid.str();
             ////viewer_->addPointCloudNormals (extractedpoints, 100, 0.002f, slicepointsidstr,0);
-            //
-            std::stringstream slicecubeid;
-            slicecubeid << "slicesearchcube_" << sliceindex;
-            viewer_->addSphere((*itr)->centerpt_, cableradius_*2, (r*255), (g*255), (b*255), slicecubeid.str());
-            std::cout << "slice " << sliceindex << " points size: " << extractedpoints->points.size() << std::endl;
+
+            //std::stringstream slicesphereid;
+            //slicesphereid << "slicesearchsphere_" << sliceindex;
+            //viewer_->addSphere((*itr)->centerpt_, cableradius_*2, (r*255), (g*255), (b*255), slicesphereid.str());
+            std::cout << "slice " << sliceindex
+                << " Inliers: " << (*itr)->cylinderindices->indices.size() << "/"
+                << (*itr)->searchedindices->indices.size()
+                << std::endl;
 
             std::stringstream textss;
-            textss << "slice_" << sliceindex;
+            textss << namesuffix << "slice_" << sliceindex;
             viewer_->addText3D (textss.str(), pt0, 0.001);
         }
+    } /*}}}*/
 
-        //if (extractedpoints->points.size() > 0) {
-        //    pcl::io::savePCDFileBinaryCompressed ("extractedpoints.pcd", *extractedpoints);
-        //}
+    void findCableTerminal(Cable& cable, double offset) {
+        if (cable.size() < 3) {
+            pcl::console::print_highlight("no enough cable slices to find terminals. break.");
+            return;
+        }
+        //CableSlicePtr firstslice = cable.front();
+        //CableSlicePtr lastslice  = cable.back();
+        //
+        pcl::ModelCoefficients::Ptr firstterminalcoeffs(new pcl::ModelCoefficients(*terminalcylindercoeffs_));
+        pcl::PointXYZ pt;
+        Eigen::Vector3f dir; 
+        dir(0) = (*cable.begin())->cylindercoeffs->values[3] + (*boost::next(cable.begin(),1))->cylindercoeffs->values[3] + (*boost::next(cable.begin(),2))->cylindercoeffs->values[3];
+        dir(1) = (*cable.begin())->cylindercoeffs->values[4] + (*boost::next(cable.begin(),1))->cylindercoeffs->values[4] + (*boost::next(cable.begin(),2))->cylindercoeffs->values[4];
+        dir(2) = (*cable.begin())->cylindercoeffs->values[5] + (*boost::next(cable.begin(),1))->cylindercoeffs->values[5] + (*boost::next(cable.begin(),2))->cylindercoeffs->values[5];
+        dir.normalize();
+        firstterminalcoeffs->values[0] = (*cable.begin())->cylindercoeffs->values[0] + dir(0) * (offset);
+        firstterminalcoeffs->values[1] = (*cable.begin())->cylindercoeffs->values[1] + dir(1) * (offset);
+        firstterminalcoeffs->values[2] = (*cable.begin())->cylindercoeffs->values[2] + dir(2) * (offset);
+        firstterminalcoeffs->values[3] = dir[0];
+        firstterminalcoeffs->values[4] = dir[1];
+        firstterminalcoeffs->values[5] = dir[2];
+        firstterminalcoeffs->values[6] += 0.005;
+        firstterminalcoeffs->values[7] += 0.003;
+        firstterminalcoeffs->values[8] -= 0.005;
+
+        pcl::PointIndices::Ptr firstterminalscenepointsindices(new pcl::PointIndices());
+        size_t points = findScenePointIndicesInsideCylinder(firstterminalcoeffs, firstterminalscenepointsindices);
+        if (points < 30) {
+            PCL_INFO("too few points at the first slice to detect termianal\n");
+        } else {
+            pcl::ExtractIndices<PointNT> extract;
+            PointCloudInputPtr firstterminalscenepoints(new PointCloudInput());
+            extract.setInputCloud (input_);
+            extract.setIndices (firstterminalscenepointsindices);
+            //extract.setNegative (true);
+            extract.filter (*firstterminalscenepoints);
+
+            // visualize points/*{{{*/
+            //pcl::visualization::PointCloudColorHandlerRGBField<pcl::PointXYZRGBNormal> rgbfield(extractedpoints);
+            pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(firstterminalscenepoints, 255, 0, 255);
+
+            viewer_->removePointCloud ("extracted_points");
+            viewer_->addPointCloud<PointNT> (firstterminalscenepoints, rgbfield,  "extracted_points");
+            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "extracted_points");
+            pcl::ModelCoefficients::Ptr cylmodel(new pcl::ModelCoefficients());
+            cylmodel->values.resize(7);
+            for (int i = 0; i < 7; i++) {
+                cylmodel->values[i] = firstterminalcoeffs->values[i];
+            }
+            std::cout << firstterminalcoeffs->values[0] << " "
+                << firstterminalcoeffs->values[1] << " "
+                << firstterminalcoeffs->values[2] << " " << std::endl;
+            std::cout << firstterminalcoeffs->values[3] << " "
+                << firstterminalcoeffs->values[4] << " "
+                << firstterminalcoeffs->values[5] << " " << std::endl;
+            std::cout << firstterminalcoeffs->values[6] << " "
+                << firstterminalcoeffs->values[7] << " "
+                << firstterminalcoeffs->values[8] << " " << std::endl;
+            //viewer_->addCylinder(*cylmodel);
+            // end of visualize points/*}}}*/
+
+            pcl::console::print_highlight ("Downsampling...\n");
+            pcl::VoxelGrid<PointNT> grid;
+            PointCloudInputPtr voxelterminalcloud(new PointCloudInput());
+            PointCloudInputPtr voxelterminalcloudclosetoscene(new PointCloudInput());
+            double leafsize = 0.001;
+            grid.setLeafSize (leafsize, leafsize, leafsize);
+            grid.setInputCloud (firstterminalscenepoints);
+            grid.filter (*firstterminalscenepoints);
+            grid.setInputCloud (terminalcloud_);
+            grid.filter (*voxelterminalcloud);
+
+            // Estimate normals for scene
+            pcl::console::print_highlight ("Estimating scene normals...\n");
+            pcl::NormalEstimationOMP<PointNT,PointNT> nest;
+            nest.setRadiusSearch (2*leafsize);
+            nest.setInputCloud (firstterminalscenepoints);
+            nest.compute (*firstterminalscenepoints);
+            nest.setInputCloud (voxelterminalcloud);
+            nest.compute (*voxelterminalcloud);
+
+            // compute cross product
+            Eigen::Vector3f v(terminalcylindercoeffs_->values[3],terminalcylindercoeffs_->values[4],terminalcylindercoeffs_->values[5]);
+            Eigen::Vector3f rotaxis = v.cross(dir);
+            double rottheta = asin(rotaxis.norm());
+            rotaxis.normalize();
+            //Eigen::Transform<float, 3, Eigen::Affine> t; //same as the following one
+            Eigen::Affine3f t;
+            t = Eigen::Translation<float, 3>(firstterminalcoeffs->values[0], firstterminalcoeffs->values[1], firstterminalcoeffs->values[2]) * Eigen::AngleAxisf(rottheta, rotaxis);
+            viewer_->addCoordinateSystem(0.1, t);
+
+            FeatureCloudT::Ptr terminal_features (new FeatureCloudT); //should be a class member
+            FeatureCloudT::Ptr scene_features (new FeatureCloudT); //should be a class member
+            FeatureEstimationT fest;
+            
+            fest.setRadiusSearch (0.002);
+            fest.setInputCloud (firstterminalscenepoints);
+            fest.setInputNormals (firstterminalscenepoints);
+            fest.compute (*scene_features);
+            fest.setInputCloud (voxelterminalcloud);
+            fest.setInputNormals (voxelterminalcloud);
+            fest.compute (*terminal_features);
+            
+
+            //////////////////////////////////
+/*{{{*/
+            /*
+            pcl::IterativeClosestPointWithNormals<PointNT, PointNT> icp;
+            size_t rotnum = 4;
+            for (size_t irot = 0; irot < rotnum; irot++) {
+                pcl::console::print_highlight ("Starting terminal alignment... (%d)\n", irot);
+                Eigen::Affine3f rotaffine;
+                rotaffine = Eigen::AngleAxisf(2.0*M_PI/rotnum,v);
+                pcl::transformPointCloudWithNormals (*voxelterminalcloud, *voxelterminalcloud, rotaffine);
+                icp.setInputCloud(firstterminalscenepoints);
+                icp.setInputTarget(voxelterminalcloud);
+                // Set the max correspondence distance to 5cm (e.g., correspondences with higher distances will be ignored)
+                icp.setMaxCorrespondenceDistance (0.01);
+                // Set the maximum number of iterations (criterion 1)
+                icp.setMaximumIterations (1000);
+                // Set the transformation epsilon (criterion 2)
+                icp.setTransformationEpsilon (1e-8);
+                // Set the euclidean distance difference epsilon (criterion 3)
+                icp.setEuclideanFitnessEpsilon (1);
+
+                PointCloudInput finalpoints;
+                icp.align(finalpoints);
+                std::cout << "has converged:" << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl;
+
+                if (icp.hasConverged ())
+                {
+                    // Print results
+                    printf ("\n");
+                    Eigen::Matrix4f transformation = icp.getFinalTransformation ();
+                    pcl::console::print_info ("    | %6.3f %6.3f %6.3f | \n", transformation (0,0), transformation (0,1), transformation (0,2));
+                    pcl::console::print_info ("R = | %6.3f %6.3f %6.3f | \n", transformation (1,0), transformation (1,1), transformation (1,2));
+                    pcl::console::print_info ("    | %6.3f %6.3f %6.3f | \n", transformation (2,0), transformation (2,1), transformation (2,2));
+                    pcl::console::print_info ("\n");
+                    pcl::console::print_info ("t = < %0.3f, %0.3f, %0.3f >\n", transformation (0,3), transformation (1,3), transformation (2,3));
+                    pcl::console::print_info ("\n");
+                    //pcl::console::print_info ("Inliers: %i/%i\n", icp.getInliers ().size (), voxelterminalcloud->size ());
+
+                    // Show alignment
+                    PointCloudInputPtr terminalcloudforvis(new PointCloudInput());
+                    //pcl::visualization::PointCloudColorHandlerRGBField<PointNT> rgbfield(terminalcloud_);
+                    //pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZRGBNormal> rgbfield(extractedpoints, 0, 255, 0);
+                    //pcl::copyPointCloud(terminalcloud_, terminalcloudforvis);
+
+                    //pcl::transformPointCloudWithNormals (*terminalcloud_, *terminalcloudforvis, transformation);
+                    //pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(object_aligned, 0, 255, 0);
+                    //viewer_->addPointCloud<PointNT> (terminalcloudforvis, rgbfield, "firstterminal");
+                    ////viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "firstterminal");
+                    //viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "firstterminal");
+
+                    vtkSmartPointer<vtkMatrix4x4> vtkmatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+                    vtkSmartPointer<vtkTransform> vtktransformation = vtkSmartPointer<vtkTransform>::New();
+                    pcl::visualization::PCLVisualizer::convertToVtkMatrix(transformation, vtkmatrix);
+                    vtktransformation->SetMatrix(&(*vtkmatrix));
+                    viewer_->removeShape("PLYModel");
+                    viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/lancable_terminal/lancable_terminal_fine_m.ply"),
+                            vtktransformation);
+
+                }
+                else
+                {
+                    pcl::console::print_error ("Alignment failed!\n");
+                    t = t*rotaffine;
+                    vtkSmartPointer<vtkMatrix4x4> vtkmatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+                    vtkSmartPointer<vtkTransform> vtktransformation = vtkSmartPointer<vtkTransform>::New();
+                    for (size_t row = 0; row < 4; row++) {
+                        for (size_t col = 0; col < 4; col++) {
+                            vtkmatrix->SetElement(row,col,t(row,col));
+                        }
+                    }
+                    //pcl::visualization::PCLVisualizer::convertToVtkMatrix(t, vtkmatrix);
+                    vtktransformation->SetMatrix(&(*vtkmatrix));
+                    viewer_->removeShape("PLYModel");
+                    viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/lancable_terminal/lancable_terminal_fine_m.ply"), vtktransformation);
+                    viewer_->spinOnce();
+                    boost::this_thread::sleep(boost::posix_time::milliseconds(1000));
+                }
+            }
+        */
+            /*}}}*/
+            ///////////////////////////////////////
+
+            pcl::console::print_highlight ("Starting terminal alignment...\n");
+            pcl::SampleConsensusPrerejective<PointNT,PointNT,FeatureT> align;
+            size_t rotnum = 4;
+            for (size_t irot = 0; irot < rotnum; irot++) {
+                pcl::console::print_highlight ("Starting terminal alignment... (%d)\n", irot);
+
+                Eigen::Affine3f rotaffine;
+                rotaffine = Eigen::AngleAxisf(2.0*M_PI/rotnum,v);
+                Eigen::Affine3f tnew;
+                tnew = t;
+                for (size_t i = 0; i < irot; i++) {
+                    tnew = tnew * rotaffine;
+                }
+
+                viewer_->removeCoordinateSystem();
+                viewer_->addCoordinateSystem(0.1, tnew);
+                PointCloudInputPtr transformedterminalcloud(new PointCloudInput);
+                pcl::copyPointCloud<PointNT>(*voxelterminalcloud, *transformedterminalcloud);
+                pcl::transformPointCloudWithNormals (*transformedterminalcloud, *transformedterminalcloud, tnew); //TODO incorrect
+
+                align.setInputSource (transformedterminalcloud); //(voxelterminalcloud);
+                align.setSourceFeatures (terminal_features);
+                align.setInputTarget (firstterminalscenepoints);
+                align.setTargetFeatures (scene_features);
+                align.setMaximumIterations (10000); // Number of RANSAC iterations
+                align.setNumberOfSamples (3); // Number of points to sample for generating/prerejecting a pose
+                align.setCorrespondenceRandomness (2); // Number of nearest features to use
+                align.setSimilarityThreshold (0.9f); // Polygonal edge length similarity threshold
+                align.setMaxCorrespondenceDistance(1.5f * leafsize); // Inlier threshold
+                align.setInlierFraction (0.4f);//(0.25f); // Required inlier fraction for accepting a pose hypothesis
+                PointCloudInputPtr object_aligned(new PointCloudInput());
+                {
+                    pcl::ScopeTime t("Alignment");
+                    align.align (*object_aligned);
+                }
+
+                if (align.hasConverged ())
+                {
+                    // Print results
+                    printf ("\n");
+                    Eigen::Matrix4f transformation = align.getFinalTransformation ();
+                    pcl::console::print_info ("    | %6.3f %6.3f %6.3f | \n", transformation (0,0), transformation (0,1), transformation (0,2));
+                    pcl::console::print_info ("R = | %6.3f %6.3f %6.3f | \n", transformation (1,0), transformation (1,1), transformation (1,2));
+                    pcl::console::print_info ("    | %6.3f %6.3f %6.3f | \n", transformation (2,0), transformation (2,1), transformation (2,2));
+                    pcl::console::print_info ("\n");
+                    pcl::console::print_info ("t = < %0.3f, %0.3f, %0.3f >\n", transformation (0,3), transformation (1,3), transformation (2,3));
+                    pcl::console::print_info ("\n");
+                    pcl::console::print_info ("Inliers: %i/%i\n", align.getInliers ().size (), voxelterminalcloud->size ());
+
+                    // Show alignment
+                    //PointCloudInputPtr terminalcloudforvis(new PointCloudInput());
+                    //pcl::visualization::PointCloudColorHandlerRGBField<PointNT> rgbfield(terminalcloud_);
+                    //pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZRGBNormal> rgbfield(extractedpoints, 0, 255, 0);
+                    //pcl::copyPointCloud(terminalcloud_, terminalcloudforvis);
+
+                    //pcl::transformPointCloudWithNormals (*terminalcloud_, *terminalcloudforvis, transformation);
+                    //pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(object_aligned, 0, 255, 0);
+                    //viewer_->addPointCloud<PointNT> (terminalcloudforvis, rgbfield, "firstterminal");
+                    ////viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "firstterminal");
+                    //viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "firstterminal");
+
+                    vtkSmartPointer<vtkMatrix4x4> vtkmatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+                    vtkSmartPointer<vtkTransform> vtktransformation = vtkSmartPointer<vtkTransform>::New();
+                    pcl::visualization::PCLVisualizer::convertToVtkMatrix(tnew.inverse()*transformation, vtkmatrix);
+                    vtktransformation->SetMatrix(&(*vtkmatrix));
+                    viewer_->removeShape("PLYModel");
+                    viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/lancable_terminal/lancable_terminal_fine_m.ply"),
+                            vtktransformation);
+                    break;
+                }
+                else
+                {
+                    pcl::console::print_error ("Alignment failed!\n");
+                    vtkSmartPointer<vtkMatrix4x4> vtkmatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+                    vtkSmartPointer<vtkTransform> vtktransformation = vtkSmartPointer<vtkTransform>::New();
+                    for (size_t row = 0; row < 4; row++) {
+                        for (size_t col = 0; col < 4; col++) {
+                            vtkmatrix->SetElement(row,col,tnew(row,col));
+                        }
+                    }
+                    vtktransformation->SetMatrix(&(*vtkmatrix));
+                    viewer_->removeShape("PLYModel");
+                    viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/lancable_terminal/lancable_terminal_fine_m.ply"), vtktransformation);
+                    //pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(object_aligned, 0, 255, 0);
+                    //viewer_->addPointCloud<PointNT> (terminalcloudforvis, rgbfield, "firstterminal");
+                    ////viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "firstterminal");
+                    //viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "firstterminal");
+
+                    viewer_->spinOnce();
+                    //boost::this_thread::sleep(boost::posix_time::milliseconds(1000));
+
+                }
+            }
+        }
+
+    }
+
+    /* 
+     * param[in] terminalcylindercoeffs: terminalcylindercoeffs
+     * param[out] indices: scene point indices inside terminal cylinder
+     * return: the size of indices
+     */
+    size_t findScenePointIndicesInsideCylinder(pcl::ModelCoefficients::Ptr terminalcylindercoeffs, pcl::PointIndices::Ptr indices)/*{{{*/
+    {
+        Eigen::Vector3f w(terminalcylindercoeffs->values[3], terminalcylindercoeffs->values[4], terminalcylindercoeffs->values[5]);
+        w.normalize(); // just in case
+
+        double radius      = terminalcylindercoeffs->values[6];
+        double upperheight = terminalcylindercoeffs->values[7];
+        double lowerheight = terminalcylindercoeffs->values[8];
+        size_t count = 0;
+
+        for (size_t i = 0; i < input_->points.size(); i++) {
+            Eigen::Vector3f v(input_->points[i].x - terminalcylindercoeffs->values[0],
+                    input_->points[i].y - terminalcylindercoeffs->values[1],
+                    input_->points[i].z - terminalcylindercoeffs->values[2]);
+            Eigen::Vector3f projectedv = v.dot(w) * w;
+            double h = projectedv.norm();
+            if (h > upperheight || h < lowerheight) {
+                continue;
+            }
+            Eigen::Vector3f radiationv = v - projectedv;
+            double r2 = radiationv.norm();
+            if (r2 > radius) {
+                continue;
+            }
+            indices->indices.push_back(i);
+            count++;
+        }
+        return count;
     }/*}}}*/
 
     pcl::PointIndices::Ptr findClosePointsIndices(pcl::PointXYZ pt, double radius = 0) { /*{{{*/
@@ -410,10 +888,8 @@ public:
         }
         pcl::PointIndices::Ptr k_indices(new pcl::PointIndices());
         std::vector<float> k_sqr_distances;
-        pcl::KdTreeFLANN<pcl::PointXYZ>::Ptr tree (new pcl::KdTreeFLANN<pcl::PointXYZ>());
-        // NOTE: when you change input_, you also need to change points_!
-        tree->setInputCloud(points_);
-        tree->radiusSearch (pt, radius, k_indices->indices, k_sqr_distances);
+        kdtree_->setInputCloud(points_);
+        kdtree_->radiusSearch (pt, radius, k_indices->indices, k_sqr_distances);
         return k_indices;
     } /*}}}*/
 
@@ -459,18 +935,34 @@ public:
                   << slice.cylindercoeffs->values[4] << " "
                   << slice.cylindercoeffs->values[5] << " "
                   << slice.cylindercoeffs->values[6] << " " << std::endl;
-        return validateCableSlice(slice.cylindercoeffs);
+        return validateCableSlice(slice);
     } /*}}}*/
 
-    bool validateCableSlice (pcl::ModelCoefficients::Ptr cylindercoeffs) /*{{{*/
+    bool validateCableSlice (CableSlice& slice) /*{{{*/
     {
-        PCL_INFO("[validateCableSlice] radius: %f, given: %f\n", cylindercoeffs->values[6], cableradius_);
-        if(cableradius_* 0.7 < cylindercoeffs->values[6] && cylindercoeffs->values[6] < cableradius_* 1.3 ) {
-            return true;
+        PCL_INFO("[validateCableSlice] radius: %f, given: %f\n", slice.cylindercoeffs->values[6], cableradius_);
+        if(cableradius_* 0.65 > slice.cylindercoeffs->values[6] || slice.cylindercoeffs->values[6] > cableradius_* 1.35 ) {
+            return false;
         }
-        return false;
+        return true;
     } /*}}}*/
 
+    void keyboard_callback (const pcl::visualization::KeyboardEvent& event) /*{{{*/
+    {
+        /*
+           std::cout << event.getKeySym() << std::endl;
+           if(event.getKeySym() == "i") {
+            if (rendering_input_) {
+                viewer_->removePointCloud("inputcloud");
+                rendering_input_ = false;
+            }
+            else {
+                viewer_->addPointCloud<pcl::PointNormal> (input_, "inputcloud");
+                rendering_input_ = true;
+            }
+           }
+         */
+    } /*}}}*/
     void area_picking_callback (const pcl::visualization::AreaPickingEvent &event) /*{{{*/
     {
         if (event.getPointsIndices (indices_->indices)) {
@@ -517,14 +1009,26 @@ public:
     } /*}}}*/
 
     PointCloudInputPtr input_;
+    PointCloudInputPtr terminalcloud_;
+    pcl::ModelCoefficients::Ptr terminalcylindercoeffs_;
+    /* note: terminalcylindermodelcoeffs has '''9''' values
+     * 0, 1, 2: pos
+     * 3, 4, 5: dir
+     * 6      : radius
+     * 7,8    : upperheight, lowerheight
+     */
     pcl::PointCloud<pcl::PointXYZ>::Ptr points_;
     pcl::PointIndices::Ptr indices_;
+    pcl::KdTreeFLANN<pcl::PointXYZ>::Ptr kdtree_;
+
     double distthreshold_cylindermodel_;
+    double scenesampling_radius_;
     double cableradius_;
     double cableslicelen_;
     std::vector<Cable> cables_;
     const int tryfindingpointscounts_;
 
+    boost::shared_ptr<boost::thread> viewerthread_;
     boost::mutex cables_mutex_;
     boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer_;
 
