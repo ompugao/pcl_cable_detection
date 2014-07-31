@@ -900,7 +900,10 @@ public:
         pcl::PointIndices::Ptr cylinderinlierindices(new pcl::PointIndices());
         // Optional
         seg.setOptimizeCoefficients (true);
-        seg.setAxis (initialaxis);
+        Eigen::Vector3f axis;
+        axis = initialaxis;
+        axis.normalize();
+        seg.setAxis (axis);
         seg.setEpsAngle(eps_angle);
         // Mandatory
         seg.setModelType (pcl::SACMODEL_CYLINDER);
@@ -912,6 +915,10 @@ public:
         seg.setInputNormals (input_);
         seg.setIndices(pointsindices);
         seg.segment (*slice.cylinderindices, *slice.cylindercoeffs);
+
+        if (slice.cylinderindices->indices.size() == 0) {
+            return false;
+        }
 
         if (!(centerpt.x == 0 && centerpt.y == 0 && centerpt.z == 0)) {
             // fix the center of the slice
