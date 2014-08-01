@@ -238,13 +238,6 @@ public:
         viewer_mutex_.unlock();
     }
 
-    void RunViewerBackGround(){ /*{{{*/
-        if(!viewer_) {
-            SetUpViewer();
-        }
-        viewerthread_.reset(new boost::thread(boost::bind(&CableDetection::RunViewer, this)));
-    }/*}}}*/
-
     void SetUpViewer() { /*{{{*/
         {
             boost::mutex::scoped_lock lock(viewer_mutex_);
@@ -272,6 +265,9 @@ public:
         */
     } /*}}}*/
     void RunViewer() {/*{{{*/
+        if(!viewer_) {
+            SetUpViewer();
+        }
         while (!viewer_->wasStopped ())
         {
             {
@@ -280,6 +276,12 @@ public:
             }
             boost::this_thread::sleep(boost::posix_time::milliseconds(100));
         }
+    }/*}}}*/
+    void RunViewerBackGround(){ /*{{{*/
+        if(!viewer_) {
+            SetUpViewer();
+        }
+        viewerthread_.reset(new boost::thread(boost::bind(&CableDetection::RunViewer, this)));
     }/*}}}*/
 
     /*
@@ -336,6 +338,7 @@ public:
         //findCableTerminal(cable, 0.018);
     } /*}}}*/
 
+    // lock viewer occasionally
     void findCables(std::vector<Cable>& cables)
     {
         pcl::PointCloud<int> sampled_indices;
@@ -382,6 +385,7 @@ public:
         }
     }
 
+    // note: viewer lock free
     Cable findCableFromPoint(pcl::PointXYZ point) { /*{{{*/
         pcl::PointIndices::Ptr k_indices;
         k_indices = findClosePointsIndices(point);
@@ -512,6 +516,7 @@ public:
         return cable;
     } /*}}}*/
 
+    // note: lock viewer_mutex_ beforehand
     void visualizeCable(Cable& cable, std::string namesuffix = "") { /*{{{*/
         size_t sliceindex = 0;
         for (typename std::list<CableSlicePtr>::iterator itr = cable.begin(); itr != cable.end(); ++itr, ++sliceindex) {
