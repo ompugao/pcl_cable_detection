@@ -196,6 +196,11 @@ public:
     void setInputCloud(PointCloudInputPtr input)
     {
         input_ = input;
+        if (!!viewer_) {
+            boost::mutex::scoped_lock lock(viewer_mutex_);
+            viewer_->removePointCloud("inputcloud");
+            viewer_->addPointCloud<PointNT> (input_, "inputcloud");
+        }
         // create pointcloud<pointxyz>
         points_.reset(new pcl::PointCloud<pcl::PointXYZ>());
         pcl::copyPointCloud(*input_, *points_);
@@ -226,20 +231,31 @@ public:
         scenesampling_radius_ = scenesampling_radius;
     }
 
+    void LockViewer() {
+        viewer_mutex_.lock();
+    }
+    void UnLockViewer() {
+        viewer_mutex_.unlock();
+    }
+
     void RunViewerBackGround(){ /*{{{*/
         if(!viewer_) {
-            viewerthread_.reset(new boost::thread(boost::bind(&CableDetection::RunViewer, this)));
+            SetUpViewer();
         }
+        viewerthread_.reset(new boost::thread(boost::bind(&CableDetection::RunViewer, this)));
     }/*}}}*/
 
-    void RunViewer(){ /*{{{*/
-        viewer_.reset(new pcl::visualization::PCLVisualizer("PCL viewer_"));
-        viewer_->setBackgroundColor (0.0, 0.0, 0.0);
-        viewer_->addPointCloud<PointNT> (input_, "inputcloud");
-        viewer_->addCoordinateSystem(0.5);
-        //viewer_->registerAreaPickingCallback(boost::bind(&CableDetection::area_picking_callback, this,_1));
-        viewer_->registerPointPickingCallback(boost::bind(&CableDetection::point_picking_callback, this, _1));
-        viewer_->registerKeyboardCallback(boost::bind(&CableDetection::keyboard_callback, this, _1));
+    void SetUpViewer() { /*{{{*/
+        {
+            boost::mutex::scoped_lock lock(viewer_mutex_);
+            viewer_.reset(new pcl::visualization::PCLVisualizer("PCL cable detection viewer"));
+            viewer_->setBackgroundColor (0.0, 0.0, 0.0);
+            viewer_->addCoordinateSystem(0.5);
+            //viewer_->registerAreaPickingCallback(boost::bind(&CableDetection::area_picking_callback, this,_1));
+            viewer_->registerPointPickingCallback(boost::bind(&CableDetection::point_picking_callback, this, _1));
+            viewer_->registerKeyboardCallback(boost::bind(&CableDetection::keyboard_callback, this, _1));
+        }
+        /*
         std::vector<Cable> cables;
         {
             pcl::ScopeTime t("findCables");
@@ -253,11 +269,18 @@ public:
             viewer_->spinOnce ();
         }
         std::cout << "found " << cables.size() << " cables"<< std::endl;
+        */
+    } /*}}}*/
+    void RunViewer() {/*{{{*/
         while (!viewer_->wasStopped ())
         {
-            viewer_->spinOnce ();
+            {
+                boost::mutex::scoped_lock lock(viewer_mutex_);
+                viewer_->spinOnce ();
+            }
+            boost::this_thread::sleep(boost::posix_time::milliseconds(100));
         }
-    } /*}}}*/
+    }/*}}}*/
 
     /*
      * param[in] cloud: model cloud
@@ -296,7 +319,6 @@ public:
 
     void point_picking_callback (const pcl::visualization::PointPickingEvent& event) /*{{{*/
     {
-        boost::mutex::scoped_lock lock(cables_mutex_);
         //pcl::PointXYZ pt;
         //event.getPoint (pt.x, pt.y, pt.z);
         size_t idx = event.getPointIndex ();
@@ -307,10 +329,11 @@ public:
         selectedpoint.y = input_->points[idx].y;
         selectedpoint.z = input_->points[idx].z;
         Cable cable = findCableFromPoint(selectedpoint);
+        // do not lock viewer mutex!!! the function who calls point_picking_callback itself is locking mutex
         viewer_->removeAllShapes();
         visualizeCable(cable);
         //findCableTerminal(cable, 0.027);
-        findCableTerminal(cable, 0.018);
+        //findCableTerminal(cable, 0.018);
     } /*}}}*/
 
     void findCables(std::vector<Cable>& cables)
@@ -323,6 +346,7 @@ public:
         PointCloudInputPtr sampledpoints(new PointCloudInput);
         pcl::copyPointCloud (*input_, sampled_indices.points, *sampledpoints);
         if (!!viewer_) {
+            boost::mutex::scoped_lock lock(viewer_mutex_);
             viewer_->removePointCloud ("sampledpoints");
             pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(sampledpoints, 255, 128, 128);
             viewer_->addPointCloud<PointNT> (sampledpoints, rgbfield,  "sampledpoints");
@@ -345,12 +369,6 @@ public:
                             alreadyscanned = true;
                             break;
                         }
-                        //std::vector<int>::iterator founditr 
-                            //= std::find( (*sliceitr)->searchedindices->indices.begin(), (*sliceitr)->searchedindices->indices.end() , (*i) );
-                        //if ( founditr !=(*sliceitr)->searchedindices->indices.end() ) {
-                            //alreadyscanned = true;
-                            //break;
-                        //}
                     }
                 }
             }
@@ -522,9 +540,9 @@ public:
             pt0.x = (*itr)->cylindercoeffs->values[0];
             pt0.y = (*itr)->cylindercoeffs->values[1];
             pt0.z = (*itr)->cylindercoeffs->values[2];
-            pt1.x = (*itr)->cylindercoeffs->values[0] + (*itr)->cylindercoeffs->values[3]*0.001;
-            pt1.y = (*itr)->cylindercoeffs->values[1] + (*itr)->cylindercoeffs->values[4]*0.001;
-            pt1.z = (*itr)->cylindercoeffs->values[2] + (*itr)->cylindercoeffs->values[5]*0.001;
+            pt1.x = (*itr)->cylindercoeffs->values[0] + (*itr)->cylindercoeffs->values[3]*cableslicelen_;
+            pt1.y = (*itr)->cylindercoeffs->values[1] + (*itr)->cylindercoeffs->values[4]*cableslicelen_;
+            pt1.z = (*itr)->cylindercoeffs->values[2] + (*itr)->cylindercoeffs->values[5]*cableslicelen_;
 
             viewer_->addArrow(pt0, pt1, r, g, b, false, cylindername);
 
@@ -539,11 +557,10 @@ public:
 
             std::stringstream slicepointsid;
             slicepointsid <<namesuffix<< "slicepoints_" << sliceindex;
-            //viewer_->removePointCloud(slicepointsid.str());
-            //pcl::visualization::PointCloudColorHandlerRGBField<pcl::PointXYZRGBNormal> rgbfield(extractedpoints);
-            //pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZRGBNormal> rgbfield(extractedpoints, r*255, g*255, b*255);
-            //viewer_->addPointCloud<pcl::PointXYZRGBNormal> (extractedpoints, rgbfield, slicepointsid.str());
-            //viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, slicepointsid.str());
+            viewer_->removePointCloud(slicepointsid.str());
+            pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZRGBNormal> rgbfield(extractedpoints, r*255, g*255, b*255);
+            viewer_->addPointCloud<pcl::PointXYZRGBNormal> (extractedpoints, rgbfield, slicepointsid.str());
+            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, slicepointsid.str());
 
             //viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_COLOR, 0.0,0.0,1.0, "sample cloud_2");
             //viewer_->addPointCloud(extractedpoints, slicepointsid.str());
@@ -1036,7 +1053,7 @@ public:
     const int tryfindingpointscounts_;
 
     boost::shared_ptr<boost::thread> viewerthread_;
-    boost::mutex cables_mutex_;
+    boost::mutex viewer_mutex_;
     boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer_;
 
 };

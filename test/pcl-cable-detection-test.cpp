@@ -19,7 +19,7 @@ int main (int argc, char** argv)
     opts_desc.add_options()
         ("input_file", bpo::value< std::string >(), "Input data.")
         ("removeplane", bpo::value<bool>()->default_value(false), "findplane or not?")
-        ("voxelsize", bpo::value< double >(), "voxelsize")
+        ("voxelsize_findplane", bpo::value< double >(), "voxelsize_findplane")
         ("distthreshold_findplane", bpo::value< double >(), "distance threshold for finding plane")
         ("cableradius", bpo::value< double >(), "cable radius")
         ("distthreshold_cylindermodel", bpo::value< double >(), "distance threshold for finding cylinder")
@@ -41,7 +41,7 @@ int main (int argc, char** argv)
 
     std::string input_file = opts["input_file"].as<std::string> ();
 
-    double voxelsize = opts["voxelsize"].as<double>();
+    double voxelsize_findplane = opts["voxelsize_findplane"].as<double>();
     bool removeplane= opts["removeplane"].as<bool>();
     double distthreshold_findplane= opts["distthreshold_findplane"].as<double>();
     double cableradius = opts["cableradius"].as<double>();
@@ -58,7 +58,7 @@ int main (int argc, char** argv)
         std::cout << "finding plane..." << std::endl;
         pcl::PointIndices::Ptr inliers (new pcl::PointIndices);
         pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients);
-        if (!pcl_cable_detection::findPlane<pcl::PointNormal>(cloud, voxelsize, distthreshold_findplane, *inliers, *coefficients)) {
+        if (!pcl_cable_detection::findPlane<pcl::PointNormal>(cloud, voxelsize_findplane, distthreshold_findplane, *inliers, *coefficients)) {
             PCL_ERROR("could not find plane.");
         }
 
@@ -106,14 +106,30 @@ int main (int argc, char** argv)
     pcl::PointCloud<pcl::PointNormal>::Ptr terminalcloud(new pcl::PointCloud<pcl::PointNormal>());
     pcl::io::loadPLYFile(cableterminalply, *terminalcloud);
     Eigen::Vector3f axis(0,-1,0);
-
-    CableDetection<pcl::PointNormal> cabledetection(terminalcloud, axis);
+    typedef CableDetection<pcl::PointNormal> CableDetectionPointNormal;
+    CableDetectionPointNormal cabledetection(terminalcloud, axis);
+    cabledetection.SetUpViewer();
 
     cabledetection.setCableRadius(cableradius);
     cabledetection.setThresholdCylinderModel(distthreshold_cylindermodel);
     cabledetection.setSceneSamplingRadius(scenesamplingradius);
     cabledetection.setInputCloud(cloud_normals);
-    cabledetection.RunViewer();
+    std::vector<CableDetectionPointNormal::Cable> cables;
+    {
+        pcl::ScopeTime t("findCables");
+        cabledetection.findCables(cables);
+    }
+    int i = 0;
+    for (typename std::vector<CableDetectionPointNormal::Cable>::iterator itr = cables.begin(); itr != cables.end(); itr++ , i++) {
+        std::stringstream ss;
+        ss << "cable" << i << "_";
+        cabledetection.visualizeCable(*itr, ss.str());
+    }
+    std::cout << "found " << cables.size() << " cables"<< std::endl;
+    cabledetection.RunViewerBackGround();
+    while (true) {
+        boost::this_thread::sleep(boost::posix_time::milliseconds(1000));
+    }
     //pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr colorcloud(new pcl::PointCloud<pcl::PointXYZRGBNormal>);/*{{{*/
     //pcl::copyPointCloud (*cloud_normals, *colorcloud);
     //for (size_t i = 0; i < colorcloud->size(); i++) {
