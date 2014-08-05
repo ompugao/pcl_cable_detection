@@ -377,7 +377,18 @@ public:
             }
             }
             if (not alreadyscanned) {
-                Cable cable = findCableFromPoint(points_->points[isample]);
+                if (!!viewer_) {
+                    boost::mutex::scoped_lock lock(viewer_mutex_);
+                    std::stringstream textss;
+                    textss << "sampled_pt_" << isample;
+                    viewer_->addText3D (textss.str(), sampledpoints->points[isample], 0.001);
+                }
+                pcl::PointXYZ eachpt;
+                eachpt.x = sampledpoints->points[isample].x;
+                eachpt.y = sampledpoints->points[isample].y;
+                eachpt.z = sampledpoints->points[isample].z;
+                Cable cable = _findCableFromPoint(eachpt);
+
                 if(cable.size() > 0) {
                     cables.push_back(cable);
                 }
