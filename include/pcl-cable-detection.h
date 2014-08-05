@@ -190,9 +190,10 @@ public:
         // compute the bounding cylinder of the terminal
         terminalcloud_ = terminalcloud;
         terminalcylindercoeffs_.reset(new pcl::ModelCoefficients());
-        computeBoundingCylinder(terminalcloud_, terminalaxis, terminalcylindercoeffs_);
+        _computeBoundingCylinder(terminalcloud_, terminalaxis, terminalcylindercoeffs_);
     }
-
+    // setter
+    /*{{{*/
     void setInputCloud(PointCloudInputPtr input)
     {
         input_ = input;
@@ -222,7 +223,7 @@ public:
 
     void setCableRadius(double cableradius) {
         cableradius_ = cableradius;
-        cableslicelen_ = 4 * cableradius_;
+        cableslicelen_ = 2 * cableradius_;
     }
     void setThresholdCylinderModel(double distthreshold_cylindermodel) {
         distthreshold_cylindermodel_ = distthreshold_cylindermodel;
@@ -230,6 +231,7 @@ public:
     void setSceneSamplingRadius(double scenesampling_radius) {
         scenesampling_radius_ = scenesampling_radius;
     }
+/*}}}*/
 
     void LockViewer() {
         viewer_mutex_.lock();
@@ -289,7 +291,7 @@ public:
      * param[in] axis: bounding cylinder axis of the model
      * param[out] cylindercoeffs: the extended cylinder model coefficients
      */
-    void computeBoundingCylinder(PointCloudInputPtr cloud, Eigen::Vector3f axis, pcl::ModelCoefficients::Ptr cylindercoeffs) { /*{{{*/
+    void _computeBoundingCylinder(PointCloudInputPtr cloud, Eigen::Vector3f axis, pcl::ModelCoefficients::Ptr cylindercoeffs) { /*{{{*/
         cylindercoeffs->values.resize(9);
         cylindercoeffs->values[0] = cylindercoeffs->values[1] = cylindercoeffs->values[2] = 0.0;
         axis.normalize();
@@ -330,7 +332,7 @@ public:
         selectedpoint.x = input_->points[idx].x;
         selectedpoint.y = input_->points[idx].y;
         selectedpoint.z = input_->points[idx].z;
-        Cable cable = findCableFromPoint(selectedpoint);
+        Cable cable = _findCableFromPoint(selectedpoint);
         // do not lock viewer mutex!!! the function who calls point_picking_callback itself is locking mutex
         viewer_->removeAllShapes();
         visualizeCable(cable);
@@ -339,7 +341,7 @@ public:
     } /*}}}*/
 
     // lock viewer occasionally
-    void findCables(std::vector<Cable>& cables)
+    void findCables(std::vector<Cable>& cables)/*{{{*/
     {
         pcl::PointCloud<int> sampled_indices;
         pcl::UniformSampling<PointNT> uniform_sampling;
@@ -361,8 +363,10 @@ public:
 
             // check if the sampled point is already found or not.
             {
-            pcl::ScopeTime t("<----> sampled point is already found? <---->");
-            pcl::PointIndices::Ptr indicesaround = findClosePointsIndices(points_->points[isample]);
+            //pcl::ScopeTime t("<----> sampled point is already found? <---->");
+
+            pcl::StopWatch sw;
+            pcl::PointIndices::Ptr indicesaround = _findClosePointsIndices(points_->points[isample]);
             for (std::vector<int>::iterator i = indicesaround->indices.begin(); i != indicesaround->indices.end(); i++) {
                 for (typename std::vector<Cable>::iterator itr = cables.begin(); itr != cables.end(); itr++) {
                     for (typename std::list<CableSlicePtr>::iterator sliceitr = (*itr).begin(); sliceitr!= (*itr).end(); ++sliceitr) {
@@ -375,6 +379,9 @@ public:
                     }
                 }
             }
+            double val = sw.getTime();
+            PCL_INFO("<---> it took %fms to check if the %dth sampled point is already scanned or not. scanned?: %d <--->\n", val, isample, alreadyscanned);
+            
             }
             if (not alreadyscanned) {
                 if (!!viewer_) {
@@ -394,21 +401,21 @@ public:
                 }
             }
         }
-    }
+    }/*}}}*/
 
     // note: viewer lock free
-    Cable findCableFromPoint(pcl::PointXYZ point) { /*{{{*/
+    Cable _findCableFromPoint(pcl::PointXYZ point, const std::vector<Cable>& foundcables = std::vector<Cable>()) { /*{{{*/
         pcl::PointIndices::Ptr k_indices;
-        k_indices = findClosePointsIndices(point);
-        pcl::PointXYZ pt;
-
         Cable cable;
         CableSlicePtr slice, oldslice, baseslice;
         slice.reset(new CableSlice());
         oldslice.reset(new CableSlice());
-        bool cableslicefound = estimateCylinderAroundPointsIndices(k_indices, *slice);
+
+        k_indices = _findClosePointsIndices(point);
+        pcl::PointXYZ pt;
+        bool cableslicefound = _estimateCylinderAroundPointsIndices(k_indices, *slice);
         if (!cableslicefound) {
-            PCL_INFO("[first search] no valid slice found\n");
+            PCL_INFO("[first search] no valid slice found, break.\n");
             return cable;
         }
         oldslice = slice; baseslice = slice;
@@ -430,7 +437,7 @@ public:
                 pt.y += oldslice->cylindercoeffs->values[4]*cableslicelen_;
                 pt.z += oldslice->cylindercoeffs->values[5]*cableslicelen_;
 
-                k_indices = findClosePointsIndices(pt);
+                k_indices = _findClosePointsIndices(pt);
                 if (k_indices->indices.size() < 30) {
                     if (tryindex == 0) {
                         PCL_INFO("[forward search] very little (%d) close points found (itr:%d)\n", k_indices->indices.size(), iteration);
@@ -448,10 +455,18 @@ public:
                 break;
             }
 
+            if (foundcables.size() != 0)
+            {
+                if(_isAlreadyScanned(k_indices, foundcables))
+                {
+                    PCL_INFO("[forward search] one of close points is already scanned, break.\n");
+                    return cable;
+                }
+            }
             slice.reset(new CableSlice());
             slice->centerpt_= pt;
             Eigen::Vector3f initialaxis(oldslice->cylindercoeffs->values[3], oldslice->cylindercoeffs->values[4], oldslice->cylindercoeffs->values[5]);
-            cableslicefound = estimateCylinderAroundPointsIndices(k_indices, *slice, pt, initialaxis, 1);
+            cableslicefound = _estimateCylinderAroundPointsIndices(k_indices, *slice, pt, initialaxis, 1);
             if (!cableslicefound) {
                 PCL_INFO("[forward search]: no valid slice found (itr:%d)\n", iteration);
                 //NOTE: for debug
@@ -485,7 +500,7 @@ public:
                 pt.y -= oldslice->cylindercoeffs->values[4]*cableslicelen_;
                 pt.z -= oldslice->cylindercoeffs->values[5]*cableslicelen_;
 
-                k_indices = findClosePointsIndices(pt);
+                k_indices = _findClosePointsIndices(pt);
                 if (k_indices->indices.size() < 30) {
                     if (tryindex == 0) {
                         PCL_INFO("[forward search] very little (%d) close points found (itr:%d)\n", k_indices->indices.size(), iteration);
@@ -503,10 +518,18 @@ public:
                 break;
             }
 
+            if (foundcables.size() != 0)
+            {
+                if(_isAlreadyScanned(k_indices, foundcables))
+                {
+                    PCL_INFO("[backward search] one of close points is already scanned, break.\n");
+                    return cable;
+                }
+            }
             slice.reset(new CableSlice());
             slice->centerpt_ = pt;
             Eigen::Vector3f initialaxis(oldslice->cylindercoeffs->values[3], oldslice->cylindercoeffs->values[4], oldslice->cylindercoeffs->values[5]);
-            cableslicefound = estimateCylinderAroundPointsIndices(k_indices, *slice, pt, initialaxis, 1);
+            cableslicefound = _estimateCylinderAroundPointsIndices(k_indices, *slice, pt, initialaxis, 1);
             if (!cableslicefound) {
                 PCL_INFO("[backward search]: no valid slice found (itr:%d)\n", iteration);
                 //NOTE: for debug
@@ -526,6 +549,25 @@ public:
 
         return cable;
     } /*}}}*/
+
+    /*
+     * return true if one of the points indicated by indices is already scanned
+     */    
+    bool _isAlreadyScanned(pcl::PointIndices::Ptr indices, const std::vector<Cable>& cables)/*{{{*/
+    {
+        for (typename std::vector<Cable>::const_iterator itr = cables.begin(); itr != cables.end(); itr++) {
+            for (typename std::list<CableSlicePtr>::const_iterator sliceitr = (*itr).begin(); sliceitr!= (*itr).end(); ++sliceitr) {
+                for (std::vector<int>::iterator i = indices->indices.begin(); i != indices->indices.end(); i++) {
+                    std::vector<int>::iterator founditr 
+                        = std::find( (*sliceitr)->searchedindices->indices.begin(), (*sliceitr)->searchedindices->indices.end() , (*i) );
+                    if ( founditr !=(*sliceitr)->searchedindices->indices.end() ) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }/*}}}*/
 
     // note: lock viewer_mutex_ beforehand
     void visualizeCable(Cable& cable, std::string namesuffix = "") { /*{{{*/
@@ -597,7 +639,7 @@ public:
         }
     } /*}}}*/
 
-    void findCableTerminal(Cable& cable, double offset) {
+    void findCableTerminal(Cable& cable, double offset) {/*{{{*/
         if (cable.size() < 3) {
             pcl::console::print_highlight("no enough cable slices to find terminals. break.");
             return;
@@ -623,7 +665,7 @@ public:
         firstterminalcoeffs->values[8] -= 0.005;
 
         pcl::PointIndices::Ptr firstterminalscenepointsindices(new pcl::PointIndices());
-        size_t points = findScenePointIndicesInsideCylinder(firstterminalcoeffs, firstterminalscenepointsindices);
+        size_t points = _findScenePointIndicesInsideCylinder(firstterminalcoeffs, firstterminalscenepointsindices);
         if (points < 30) {
             PCL_INFO("too few points at the first slice to detect termianal\n");
         } else {
@@ -878,14 +920,14 @@ public:
             }
         }
 
-    }
+    }/*}}}*/
 
     /* 
      * param[in] terminalcylindercoeffs: terminalcylindercoeffs
      * param[out] indices: scene point indices inside terminal cylinder
      * return: the size of indices
      */
-    size_t findScenePointIndicesInsideCylinder(pcl::ModelCoefficients::Ptr terminalcylindercoeffs, pcl::PointIndices::Ptr indices)/*{{{*/
+    size_t _findScenePointIndicesInsideCylinder(pcl::ModelCoefficients::Ptr terminalcylindercoeffs, pcl::PointIndices::Ptr indices)/*{{{*/
     {
         Eigen::Vector3f w(terminalcylindercoeffs->values[3], terminalcylindercoeffs->values[4], terminalcylindercoeffs->values[5]);
         w.normalize(); // just in case
@@ -915,7 +957,7 @@ public:
         return count;
     }/*}}}*/
 
-    pcl::PointIndices::Ptr findClosePointsIndices(pcl::PointXYZ pt, double radius = 0) { /*{{{*/
+    pcl::PointIndices::Ptr _findClosePointsIndices(pcl::PointXYZ pt, double radius = 0) { /*{{{*/
         if (radius == 0) {
             radius = cableradius_*2;
         }
@@ -926,7 +968,7 @@ public:
         return k_indices;
     } /*}}}*/
 
-    bool estimateCylinderAroundPointsIndices (pcl::PointIndices::Ptr pointsindices, CableSlice& slice, pcl::PointXYZ centerpt = pcl::PointXYZ(), const Eigen::Vector3f& initialaxis = Eigen::Vector3f(), double eps_angle=0.0) /*{{{*/
+    bool _estimateCylinderAroundPointsIndices (pcl::PointIndices::Ptr pointsindices, CableSlice& slice, pcl::PointXYZ centerpt = pcl::PointXYZ(), const Eigen::Vector3f& initialaxis = Eigen::Vector3f(), double eps_angle=0.0) /*{{{*/
     {
         // Create the segmentation object
         pcl::SACSegmentationFromNormals<PointNT, PointNT> seg;
@@ -975,12 +1017,11 @@ public:
                   << slice.cylindercoeffs->values[4] << " "
                   << slice.cylindercoeffs->values[5] << " "
                   << slice.cylindercoeffs->values[6] << " " << std::endl;
-        return validateCableSlice(slice);
+        return _validateCableSlice(slice);
     } /*}}}*/
-
-    bool validateCableSlice (CableSlice& slice) /*{{{*/
+    bool _validateCableSlice (CableSlice& slice) /*{{{*/
     {
-        PCL_INFO("[validateCableSlice] radius: %f, given: %f\n", slice.cylindercoeffs->values[6], cableradius_);
+        PCL_INFO("[_validateCableSlice] radius: %f, given: %f\n", slice.cylindercoeffs->values[6], cableradius_);
         if(cableradius_* 0.65 > slice.cylindercoeffs->values[6] || slice.cylindercoeffs->values[6] > cableradius_* 1.35 ) {
             return false;
         }
