@@ -358,53 +358,39 @@ public:
             viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "sampledpoints");
         }
 
+        std::vector<bool> scannedpointindicescache;
+        scannedpointindicescache.resize(input_->points.size());
+        std::fill (scannedpointindicescache.begin(),scannedpointindicescache.end(),false);
         for (size_t isample = 0; isample < sampled_indices.points.size(); isample++) {
-            bool alreadyscanned = false;
-
-            // check if the sampled point is already found or not.
-            {
-            //pcl::ScopeTime t("<----> sampled point is already found? <---->");
-
-            pcl::StopWatch sw;
-            pcl::PointIndices::Ptr indicesaround = _findClosePointsIndices(points_->points[isample]);
-            for (std::vector<int>::iterator i = indicesaround->indices.begin(); i != indicesaround->indices.end(); i++) {
-                for (typename std::vector<Cable>::iterator itr = cables.begin(); itr != cables.end(); itr++) {
-                    for (typename std::list<CableSlicePtr>::iterator sliceitr = (*itr).begin(); sliceitr!= (*itr).end(); ++sliceitr) {
-                        std::vector<int>::iterator founditr 
-                            = std::find( (*sliceitr)->searchedindices->indices.begin(), (*sliceitr)->searchedindices->indices.end() , (*i) );
-                        if ( founditr !=(*sliceitr)->searchedindices->indices.end() ) {
-                            alreadyscanned = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            double val = sw.getTime();
-            PCL_INFO("<---> it took %fms to check if the %dth sampled point is already scanned or not. scanned?: %d <--->\n", val, isample, alreadyscanned);
-            
+            bool alreadyscanned = scannedpointindicescache[sampled_indices.points[isample]];
+            if (!!viewer_) {
+                boost::mutex::scoped_lock lock(viewer_mutex_);
+                std::stringstream textss;
+                textss << "sampled_pt_" << isample;
+                viewer_->addText3D (textss.str(), sampledpoints->points[isample], 0.001);
+                viewer_->spinOnce();
             }
             if (not alreadyscanned) {
-                if (!!viewer_) {
-                    boost::mutex::scoped_lock lock(viewer_mutex_);
-                    std::stringstream textss;
-                    textss << "sampled_pt_" << isample;
-                    viewer_->addText3D (textss.str(), sampledpoints->points[isample], 0.001);
-                }
                 pcl::PointXYZ eachpt;
                 eachpt.x = sampledpoints->points[isample].x;
                 eachpt.y = sampledpoints->points[isample].y;
                 eachpt.z = sampledpoints->points[isample].z;
-                Cable cable = _findCableFromPoint(eachpt);
+                Cable cable = _findCableFromPoint(eachpt, scannedpointindicescache);
 
                 if(cable.size() > 0) {
                     cables.push_back(cable);
+                    for (typename std::list<CableSlicePtr>::iterator sliceitr = cable.begin(); sliceitr!= cable.end(); ++sliceitr) {
+                        for (std::vector<int>::const_iterator pointindexitr = (*sliceitr)->searchedindices->indices.begin(); pointindexitr != (*sliceitr)->searchedindices->indices.end(); pointindexitr++ ) {
+                            scannedpointindicescache[(*pointindexitr)] = true;
+                        }
+                    }
                 }
             }
         }
     }/*}}}*/
 
     // note: viewer lock free
-    Cable _findCableFromPoint(pcl::PointXYZ point, const std::vector<Cable>& foundcables = std::vector<Cable>()) { /*{{{*/
+    Cable _findCableFromPoint(pcl::PointXYZ point, const std::vector<bool>& scannedpointindicescache = std::vector<bool>()) { /*{{{*/
         pcl::PointIndices::Ptr k_indices;
         Cable cable;
         CableSlicePtr slice, oldslice, baseslice;
@@ -455,9 +441,9 @@ public:
                 break;
             }
 
-            if (foundcables.size() != 0)
+            if (scannedpointindicescache.size() != 0)
             {
-                if(_isAlreadyScanned(k_indices, foundcables))
+                if(_isAlreadyScanned(k_indices, scannedpointindicescache))
                 {
                     PCL_INFO("[forward search] one of close points is already scanned, break.\n");
                     return cable;
@@ -518,9 +504,9 @@ public:
                 break;
             }
 
-            if (foundcables.size() != 0)
+            if (scannedpointindicescache.size() != 0)
             {
-                if(_isAlreadyScanned(k_indices, foundcables))
+                if(_isAlreadyScanned(k_indices, scannedpointindicescache))
                 {
                     PCL_INFO("[backward search] one of close points is already scanned, break.\n");
                     return cable;
@@ -553,8 +539,9 @@ public:
     /*
      * return true if one of the points indicated by indices is already scanned
      */    
-    bool _isAlreadyScanned(pcl::PointIndices::Ptr indices, const std::vector<Cable>& cables)/*{{{*/
+    bool _isAlreadyScanned(pcl::PointIndices::Ptr indices, const std::vector<bool>& scannedpointindicescache)/*{{{*/
     {
+        /*
         for (typename std::vector<Cable>::const_iterator itr = cables.begin(); itr != cables.end(); itr++) {
             for (typename std::list<CableSlicePtr>::const_iterator sliceitr = (*itr).begin(); sliceitr!= (*itr).end(); ++sliceitr) {
                 for (std::vector<int>::iterator i = indices->indices.begin(); i != indices->indices.end(); i++) {
@@ -564,6 +551,13 @@ public:
                         return true;
                     }
                 }
+            }
+        }
+        return false;
+        */
+        for (std::vector<int>::iterator i = indices->indices.begin(); i != indices->indices.end(); i++) {
+            if (scannedpointindicescache[*i]) {
+                return true;
             }
         }
         return false;
@@ -613,12 +607,15 @@ public:
             }
 
 
+            /* uncomment this line if you want to visualize the points which are detected as cable */
+            /*
             std::stringstream slicepointsid;
             slicepointsid <<namesuffix<< "slicepoints_" << sliceindex;
             viewer_->removePointCloud(slicepointsid.str());
             pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZRGBNormal> rgbfield(extractedpoints, r*255, g*255, b*255);
             viewer_->addPointCloud<pcl::PointXYZRGBNormal> (extractedpoints, rgbfield, slicepointsid.str());
             viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, slicepointsid.str());
+            */
 
             //viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_COLOR, 0.0,0.0,1.0, "sample cloud_2");
             //viewer_->addPointCloud(extractedpoints, slicepointsid.str());
