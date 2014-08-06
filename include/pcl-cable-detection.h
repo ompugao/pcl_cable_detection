@@ -377,7 +377,7 @@ public:
                 eachpt.z = sampledpoints->points[isample].z;
                 Cable cable = _findCableFromPoint(eachpt, scannedpointindicescache);
 
-                if(cable.size() > 0) {
+                if(cable.size() > 1) {
                     cables.push_back(cable);
                     for (typename std::list<CableSlicePtr>::iterator sliceitr = cable.begin(); sliceitr!= cable.end(); ++sliceitr) {
                         for (std::vector<int>::const_iterator pointindexitr = (*sliceitr)->searchedindices->indices.begin(); pointindexitr != (*sliceitr)->searchedindices->indices.end(); pointindexitr++ ) {
