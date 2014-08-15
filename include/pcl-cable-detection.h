@@ -201,6 +201,7 @@ public:
             boost::mutex::scoped_lock lock(viewer_mutex_);
             viewer_->removePointCloud("inputcloud");
             viewer_->addPointCloud<PointNT> (input_, "inputcloud");
+            viewer_->removeAllShapes();
         }
         // create pointcloud<pointxyz>
         points_.reset(new pcl::PointCloud<pcl::PointXYZ>());
