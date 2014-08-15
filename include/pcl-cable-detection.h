@@ -357,17 +357,19 @@ public:
             pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(sampledpoints, 255, 128, 128);
             viewer_->addPointCloud<PointNT> (sampledpoints, rgbfield,  "sampledpoints");
             viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "sampledpoints");
+            viewer_->spinOnce();
         }
 
-        std::vector<bool> scannedpointindicescache;
+        std::vector<int> scannedpointindicescache;
         scannedpointindicescache.resize(input_->points.size());
-        std::fill (scannedpointindicescache.begin(),scannedpointindicescache.end(),false);
+        std::fill (scannedpointindicescache.begin(),scannedpointindicescache.end(),-1);
         for (size_t isample = 0; isample < sampled_indices.points.size(); isample++) {
-            bool alreadyscanned = scannedpointindicescache[sampled_indices.points[isample]];
+            bool alreadyscanned = (scannedpointindicescache[sampled_indices.points[isample]] == -1);
+            std::stringstream textss;
+            textss << "sampled_pt_" << isample;
             if (!!viewer_) {
                 boost::mutex::scoped_lock lock(viewer_mutex_);
-                std::stringstream textss;
-                textss << "sampled_pt_" << isample;
+                viewer_->removeText3D(textss.str());
                 viewer_->addText3D (textss.str(), sampledpoints->points[isample], 0.001);
                 viewer_->spinOnce();
             }
@@ -382,9 +384,11 @@ public:
 
                 if(cable.size() > 1) {
                     cables.push_back(cable);
+                    int cableindex = cables.size() - 1;
                     for (typename std::list<CableSlicePtr>::iterator sliceitr = cable.begin(); sliceitr!= cable.end(); ++sliceitr) {
                         for (std::vector<int>::const_iterator pointindexitr = (*sliceitr)->searchedindices->indices.begin(); pointindexitr != (*sliceitr)->searchedindices->indices.end(); pointindexitr++ ) {
-                            scannedpointindicescache[(*pointindexitr)] = true;
+                            
+                            scannedpointindicescache[(*pointindexitr)] = cableindex;
                         }
                     }
                 }
@@ -446,10 +450,10 @@ public:
 
             if (scannedpointindicescache.size() != 0)
             {
-                if(_isAlreadyScanned(k_indices, scannedpointindicescache))
+                if(_isAlreadyScanned(k_indices, scannedpointindicescache) != -1)
                 {
                     PCL_INFO("[forward search] one of close points is already scanned, break.\n");
-                    return cable;
+                    break;
                 }
             }
             slice.reset(new CableSlice());
@@ -509,10 +513,10 @@ public:
 
             if (scannedpointindicescache.size() != 0)
             {
-                if(_isAlreadyScanned(k_indices, scannedpointindicescache))
+                if(_isAlreadyScanned(k_indices, scannedpointindicescache) != -1)
                 {
                     PCL_INFO("[backward search] one of close points is already scanned, break.\n");
-                    return cable;
+                    break;
                 }
             }
             slice.reset(new CableSlice());
@@ -540,9 +544,9 @@ public:
     } /*}}}*/
 
     /*
-     * return true if one of the points indicated by indices is already scanned
+     * return cable index if one of the points indicated by indices is already scanned in some cable
      */    
-    bool _isAlreadyScanned(pcl::PointIndices::Ptr indices, const std::vector<bool>& scannedpointindicescache)/*{{{*/
+    int _isAlreadyScanned(pcl::PointIndices::Ptr indices, const std::vector<int>& scannedpointindicescache)/*{{{*/
     {
         /*
         for (typename std::vector<Cable>::const_iterator itr = cables.begin(); itr != cables.end(); itr++) {
@@ -559,11 +563,11 @@ public:
         return false;
         */
         for (std::vector<int>::iterator i = indices->indices.begin(); i != indices->indices.end(); i++) {
-            if (scannedpointindicescache[*i]) {
-                return true;
+            if (scannedpointindicescache[*i] != -1) {
+                return scannedpointindicescache[*i];
             }
         }
-        return false;
+        return -1;
     }/*}}}*/
 
     // note: lock viewer_mutex_ beforehand
@@ -667,7 +671,7 @@ public:
         pcl::PointIndices::Ptr firstterminalscenepointsindices(new pcl::PointIndices());
         size_t points = _findScenePointIndicesInsideCylinder(firstterminalcoeffs, firstterminalscenepointsindices);
         if (points < 30) {
-            PCL_INFO("too few points at the first slice to detect termianal\n");
+            PCL_INFO("too few points at the first slice to detect terminal, points: %d\n", points);
         } else {
             pcl::ExtractIndices<PointNT> extract;
             PointCloudInputPtr firstterminalscenepoints(new PointCloudInput());
@@ -982,8 +986,8 @@ public:
         seg.setEpsAngle(eps_angle);
         // Mandatory
         seg.setModelType (pcl::SACMODEL_CYLINDER);
-        seg.setMethodType (pcl::SAC_RANSAC);
-        //seg.setMethodType (pcl::SAC_RRANSAC);
+        //seg.setMethodType (pcl::SAC_RANSAC);
+        seg.setMethodType (pcl::SAC_RRANSAC);
         seg.setMaxIterations(10000);
         seg.setDistanceThreshold (distthreshold_cylindermodel_);
         seg.setInputCloud (input_);
