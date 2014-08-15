@@ -333,7 +333,7 @@ public:
         selectedpoint.x = input_->points[idx].x;
         selectedpoint.y = input_->points[idx].y;
         selectedpoint.z = input_->points[idx].z;
-        Cable cable = _findCableFromPoint(selectedpoint);
+        Cable cable = findCableFromPoint(selectedpoint);
         // do not lock viewer mutex!!! the function who calls point_picking_callback itself is locking mutex
         viewer_->removeAllShapes();
         visualizeCable(cable);
@@ -376,7 +376,9 @@ public:
                 eachpt.x = sampledpoints->points[isample].x;
                 eachpt.y = sampledpoints->points[isample].y;
                 eachpt.z = sampledpoints->points[isample].z;
-                Cable cable = _findCableFromPoint(eachpt, scannedpointindicescache);
+
+                PCL_INFO(std::string(std::string(">>> find cable from sampled_pt ") + textss.str() + std::string("\n")).c_str());
+                Cable cable = findCableFromPoint(eachpt, scannedpointindicescache);
 
                 if(cable.size() > 1) {
                     cables.push_back(cable);
@@ -391,7 +393,7 @@ public:
     }/*}}}*/
 
     // note: viewer lock free
-    Cable _findCableFromPoint(pcl::PointXYZ point, const std::vector<bool>& scannedpointindicescache = std::vector<bool>()) { /*{{{*/
+    Cable findCableFromPoint(pcl::PointXYZ point, const std::vector<int>& scannedpointindicescache = std::vector<int>()) { /*{{{*/
         pcl::PointIndices::Ptr k_indices;
         Cable cable;
         CableSlicePtr slice, oldslice, baseslice;
