@@ -220,17 +220,17 @@ link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
 # msgpack
-find_package(MsgPack)
-if(MSGPACK_FOUND)
-    include_directories(${MSGPACK_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/msgpack_extension/)
-    link_directories(${MSGPACK_LIB_DIR})
-    # MSGPACK_INCLUDE_DIR
-    # MSGPACK_LIBRARIES, the libraries to link against to use MSGPACK.
-    # MSGPACK_LIB_DIR, the location of the libraries
-    # MSGPACK_FOUND, If false, do not try to use MSGPACK
-else()
-    message("could not find msgpack (optional)")
-endif()
+#find_package(MsgPack)
+#if(MSGPACK_FOUND)
+    #include_directories(${MSGPACK_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/msgpack_extension/)
+    #link_directories(${MSGPACK_LIB_DIR})
+    ## MSGPACK_INCLUDE_DIR
+    ## MSGPACK_LIBRARIES, the libraries to link against to use MSGPACK.
+    ## MSGPACK_LIB_DIR, the location of the libraries
+    ## MSGPACK_FOUND, If false, do not try to use MSGPACK
+#else()
+    #message("could not find msgpack (optional)")
+#endif()
 
 add_subdirectory(src)
 add_subdirectory(test)
