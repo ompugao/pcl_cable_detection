@@ -20,6 +20,7 @@
 #include <pcl/pcl_base.h>
 #include <pcl/point_types.h>
 #include <pcl/registration/icp.h>
+#include <pcl/registration/gicp.h>
 #include <pcl/registration/sample_consensus_prerejective.h>
 #include <pcl/sample_consensus/method_types.h>
 #include <pcl/sample_consensus/model_types.h>
@@ -772,7 +773,8 @@ public:
 
             //////////////////////////////////
 /*{{{*/
-            pcl::IterativeClosestPointWithNormals<PointNT, PointNT> icp;
+            //pcl::IterativeClosestPointWithNormals<PointNT, PointNT> icp;
+            pcl::GeneralizedIterativeClosestPoint<PointNT, PointNT> icp;
             size_t rotnum = 4;
             Eigen::Affine3f rotaffine;
             rotaffine = Eigen::AngleAxisf(2.0*M_PI/rotnum,v);
@@ -790,7 +792,7 @@ public:
                 pcl::transformPointCloudWithNormals (*voxelterminalcloud, *transformedterminalcloud, tnew);
 
                 icp.setInputCloud(firstterminalscenepoints);
-                icp.setInputTarget(voxelterminalcloud);
+                icp.setInputTarget(transformedterminalcloud);
                 // Set the max correspondence distance to 5cm (e.g., correspondences with higher distances will be ignored)
                 icp.setMaxCorrespondenceDistance (0.1);
                 // Set the maximum number of iterations (criterion 1)
@@ -829,13 +831,13 @@ public:
                     ////viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "firstterminal");
                     //viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "firstterminal");
 
-                    vtkSmartPointer<vtkMatrix4x4> vtkmatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-                    vtkSmartPointer<vtkTransform> vtktransformation = vtkSmartPointer<vtkTransform>::New();
-                    pcl::visualization::PCLVisualizer::convertToVtkMatrix(transformation, vtkmatrix);
-                    vtktransformation->SetMatrix(&(*vtkmatrix));
-                    viewer_->removeShape("PLYModel");
-                    viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/lancable_terminal/lancable_terminal_fine_m.ply"),
-                            vtktransformation);
+                    //vtkSmartPointer<vtkMatrix4x4> vtkmatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+                    //vtkSmartPointer<vtkTransform> vtktransformation = vtkSmartPointer<vtkTransform>::New();
+                    //pcl::visualization::PCLVisualizer::convertToVtkMatrix(transformation, vtkmatrix);
+                    //vtktransformation->SetMatrix(&(*vtkmatrix));
+                    //viewer_->removeShape("PLYModel");
+                    //viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/cad/lancable_terminal/lancable_terminal_fine_m.ply"), vtktransformation);
+                    break;
 
                 }
                 else
