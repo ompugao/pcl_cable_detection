@@ -79,7 +79,8 @@ int main (int argc, char** argv)
         pcl::copyPointCloud (*cloud, *cloud_filtered);
     }
 /*}}}*/
-    std::cout << "compute curvature..." << std::endl; /*{{{*/
+    //std::cout << "compute curvature..." << std::endl; /*{{{*/
+    /*
     pcl::NormalEstimation<pcl::PointNormal, pcl::PointNormal> ne;
     std::cout << "the number of points: " << cloud->points.size() << std::endl;
     std::cout << "width: " << cloud->width << " height: " << cloud->height << std::endl;
@@ -101,8 +102,10 @@ int main (int argc, char** argv)
         //std::cout << cloud_normals->points[i].curvature << std::endl;
     }
     std::cout << "finished computing normals! size: " << cloud_normals->size() << std::endl;
+    */
 /*}}}*/
 
+    pcl::console::setVerbosityLevel (pcl::console::L_DEBUG);
     pcl::PointCloud<pcl::PointNormal>::Ptr terminalcloud(new pcl::PointCloud<pcl::PointNormal>());
     pcl::io::loadPLYFile(cableterminalply, *terminalcloud);
     Eigen::Vector3f axis(0,-1,0);
@@ -113,11 +116,17 @@ int main (int argc, char** argv)
     cabledetection.setCableRadius(cableradius);
     cabledetection.setThresholdCylinderModel(distthreshold_cylindermodel);
     cabledetection.setSceneSamplingRadius(scenesamplingradius);
-    cabledetection.setInputCloud(cloud_normals);
+    //cabledetection.setInputCloud(cloud_normals);
+    cabledetection.setInputCloud(cloud_filtered);
     std::vector<CableDetectionPointNormal::Cable> cables;
+    /*
     {
         pcl::ScopeTime t("findCables");
         cabledetection.findCables(cables);
+        for (std::vector<CableDetectionPointNormal::Cable>::iterator cableitr = cables.begin(); cableitr != cables.end(); cableitr++){
+            cabledetection.findCableTerminal(*cableitr, 0.018);
+            //cabledetection.findCableTerminal(*cableitr, 0.0);
+        }
     }
     int i = 0;
     for (typename std::vector<CableDetectionPointNormal::Cable>::iterator itr = cables.begin(); itr != cables.end(); itr++ , i++) {
@@ -126,6 +135,7 @@ int main (int argc, char** argv)
         cabledetection.visualizeCable(*itr, ss.str());
     }
     std::cout << "found " << cables.size() << " cables"<< std::endl;
+    */
     cabledetection.RunViewerBackGround();
     while (true) {
         boost::this_thread::sleep(boost::posix_time::milliseconds(1000));

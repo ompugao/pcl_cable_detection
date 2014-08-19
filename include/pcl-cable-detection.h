@@ -181,7 +181,7 @@ public:
     typedef pcl::PointCloud<FeatureT> FeatureCloudT;
 
     CableDetection(PointCloudInputPtr terminalcloud, Eigen::Vector3f terminalaxis)
-        : tryfindingpointscounts_(3)
+        : tryfindingpointscounts_(1)
     {
         cableradius_ = 0;
         distthreshold_cylindermodel_ = 0;
@@ -338,7 +338,7 @@ public:
         viewer_->removeAllShapes();
         visualizeCable(cable);
         //findCableTerminal(cable, 0.027);
-        //findCableTerminal(cable, 0.018);
+        findCableTerminal(cable, 0.018);
     } /*}}}*/
 
     // lock viewer occasionally
@@ -363,8 +363,12 @@ public:
         std::vector<int> scannedpointindicescache;
         scannedpointindicescache.resize(input_->points.size());
         std::fill (scannedpointindicescache.begin(),scannedpointindicescache.end(),-1);
+        std::vector<int> ignoreindices;
+        ignoreindices.resize(1);
+
+        int cableindex = 0;
         for (size_t isample = 0; isample < sampled_indices.points.size(); isample++) {
-            bool alreadyscanned = (scannedpointindicescache[sampled_indices.points[isample]] == -1);
+            bool alreadyscanned = (scannedpointindicescache[sampled_indices.points[isample]] != -1);
             std::stringstream textss;
             textss << "sampled_pt_" << isample;
             if (!!viewer_) {
@@ -380,11 +384,12 @@ public:
                 eachpt.z = sampledpoints->points[isample].z;
 
                 PCL_INFO(std::string(std::string(">>> find cable from sampled_pt ") + textss.str() + std::string("\n")).c_str());
-                Cable cable = findCableFromPoint(eachpt, scannedpointindicescache);
+                ignoreindices[0] = cableindex;
+                Cable cable = findCableFromPoint(eachpt, scannedpointindicescache, ignoreindices);
 
-                if(cable.size() > 1) {
+                if (1) { //(cable.size() > 1) {
                     cables.push_back(cable);
-                    int cableindex = cables.size() - 1;
+                    cableindex++;
                     for (typename std::list<CableSlicePtr>::iterator sliceitr = cable.begin(); sliceitr!= cable.end(); ++sliceitr) {
                         for (std::vector<int>::const_iterator pointindexitr = (*sliceitr)->searchedindices->indices.begin(); pointindexitr != (*sliceitr)->searchedindices->indices.end(); pointindexitr++ ) {
                             
@@ -397,7 +402,7 @@ public:
     }/*}}}*/
 
     // note: viewer lock free
-    Cable findCableFromPoint(pcl::PointXYZ point, const std::vector<int>& scannedpointindicescache = std::vector<int>()) { /*{{{*/
+    Cable findCableFromPoint(pcl::PointXYZ point, const std::vector<int>& scannedpointindicescache = std::vector<int>(), const std::vector<int>& ignoreindices = std::vector<int>()) { /*{{{*/
         pcl::PointIndices::Ptr k_indices;
         Cable cable;
         CableSlicePtr slice, oldslice, baseslice;
@@ -409,6 +414,9 @@ public:
         bool cableslicefound = _estimateCylinderAroundPointsIndices(k_indices, *slice);
         if (!cableslicefound) {
             PCL_INFO("[first search] no valid slice found, break.\n");
+            //NOTE: for debug
+            //std::copy(k_indices->indices.begin(), k_indices->indices.end(), std::back_inserter(slice->searchedindices->indices));
+            //cable.push_front(slice);
             return cable;
         }
         oldslice = slice; baseslice = slice;
@@ -450,7 +458,7 @@ public:
 
             if (scannedpointindicescache.size() != 0)
             {
-                if(_isAlreadyScanned(k_indices, scannedpointindicescache) != -1)
+                if(_isAlreadyScanned(k_indices, scannedpointindicescache, ignoreindices) != -1)
                 {
                     PCL_INFO("[forward search] one of close points is already scanned, break.\n");
                     break;
@@ -513,7 +521,7 @@ public:
 
             if (scannedpointindicescache.size() != 0)
             {
-                if(_isAlreadyScanned(k_indices, scannedpointindicescache) != -1)
+                if(_isAlreadyScanned(k_indices, scannedpointindicescache, ignoreindices) != -1)
                 {
                     PCL_INFO("[backward search] one of close points is already scanned, break.\n");
                     break;
@@ -546,7 +554,7 @@ public:
     /*
      * return cable index if one of the points indicated by indices is already scanned in some cable
      */    
-    int _isAlreadyScanned(pcl::PointIndices::Ptr indices, const std::vector<int>& scannedpointindicescache)/*{{{*/
+    int _isAlreadyScanned(pcl::PointIndices::Ptr indices, const std::vector<int>& scannedpointindicescache, const std::vector<int>& ignoreindices = std::vector<int>())/*{{{*/
     {
         /*
         for (typename std::vector<Cable>::const_iterator itr = cables.begin(); itr != cables.end(); itr++) {
@@ -562,9 +570,19 @@ public:
         }
         return false;
         */
+        bool ignoreit = false;
         for (std::vector<int>::iterator i = indices->indices.begin(); i != indices->indices.end(); i++) {
             if (scannedpointindicescache[*i] != -1) {
-                return scannedpointindicescache[*i];
+                ignoreit = false;
+                for (std::vector<int>::const_iterator j = ignoreindices.begin(); j != ignoreindices.end(); j++) {
+                    if ((*j) == scannedpointindicescache[*i]) {
+                        ignoreit = true;
+                        break;
+                    }
+                }
+                if (!ignoreit) {
+                    return scannedpointindicescache[*i];
+                }
             }
         }
         return -1;
@@ -605,6 +623,8 @@ public:
 
             viewer_->addArrow(pt0, pt1, r, g, b, false, cylindername);
 
+            /* uncomment this line if you want to visualize the points which are detected as cable */
+            /*
             pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr extractedpoints(new pcl::PointCloud<pcl::PointXYZRGBNormal>());
             pcl::copyPointCloud (*input_, *((*itr)->searchedindices), *extractedpoints);
 
@@ -613,9 +633,6 @@ public:
                 extractedpoints->points[i].rgb = *reinterpret_cast<float*>(&rgb);
             }
 
-
-            /* uncomment this line if you want to visualize the points which are detected as cable */
-            /*
             std::stringstream slicepointsid;
             slicepointsid <<namesuffix<< "slicepoints_" << sliceindex;
             viewer_->removePointCloud(slicepointsid.str());
@@ -665,10 +682,17 @@ public:
         firstterminalcoeffs->values[4] = dir[1];
         firstterminalcoeffs->values[5] = dir[2];
         firstterminalcoeffs->values[6] += 0.005;
-        firstterminalcoeffs->values[7] += 0.003;
+        firstterminalcoeffs->values[7] += 0.010;
         firstterminalcoeffs->values[8] -= 0.005;
 
         pcl::PointIndices::Ptr firstterminalscenepointsindices(new pcl::PointIndices());
+        pcl::ModelCoefficients::Ptr cylmodel(new pcl::ModelCoefficients());
+        cylmodel->values.resize(7);
+        for (int i = 0; i < 7; i++) {
+            cylmodel->values[i] = firstterminalcoeffs->values[i];
+        }
+        viewer_->removeShape("cylinder");
+        viewer_->addCylinder(*cylmodel);
         size_t points = _findScenePointIndicesInsideCylinder(firstterminalcoeffs, firstterminalscenepointsindices);
         if (points < 30) {
             PCL_INFO("too few points at the first slice to detect terminal, points: %d\n", points);
@@ -686,12 +710,7 @@ public:
 
             viewer_->removePointCloud ("extracted_points");
             viewer_->addPointCloud<PointNT> (firstterminalscenepoints, rgbfield,  "extracted_points");
-            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "extracted_points");
-            pcl::ModelCoefficients::Ptr cylmodel(new pcl::ModelCoefficients());
-            cylmodel->values.resize(7);
-            for (int i = 0; i < 7; i++) {
-                cylmodel->values[i] = firstterminalcoeffs->values[i];
-            }
+            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 5, "extracted_points");
             std::cout << firstterminalcoeffs->values[0] << " "
                 << firstterminalcoeffs->values[1] << " "
                 << firstterminalcoeffs->values[2] << " " << std::endl;
@@ -707,7 +726,7 @@ public:
             pcl::console::print_highlight ("Downsampling...\n");
             pcl::VoxelGrid<PointNT> grid;
             PointCloudInputPtr voxelterminalcloud(new PointCloudInput());
-            PointCloudInputPtr voxelterminalcloudclosetoscene(new PointCloudInput());
+            //PointCloudInputPtr voxelterminalcloudclosetoscene(new PointCloudInput());
             double leafsize = 0.001;
             grid.setLeafSize (leafsize, leafsize, leafsize);
             grid.setInputCloud (firstterminalscenepoints);
@@ -734,6 +753,7 @@ public:
             t = Eigen::Translation<float, 3>(firstterminalcoeffs->values[0], firstterminalcoeffs->values[1], firstterminalcoeffs->values[2]) * Eigen::AngleAxisf(rottheta, rotaxis);
             viewer_->addCoordinateSystem(0.1, t);
 
+            /*
             FeatureCloudT::Ptr terminal_features (new FeatureCloudT); //should be a class member
             FeatureCloudT::Ptr scene_features (new FeatureCloudT); //should be a class member
             FeatureEstimationT fest;
@@ -745,28 +765,40 @@ public:
             fest.setInputCloud (voxelterminalcloud);
             fest.setInputNormals (voxelterminalcloud);
             fest.compute (*terminal_features);
+            */
             
+            pcl::io::savePCDFileBinaryCompressed ("firstterminalscenepoints.pcd", *firstterminalscenepoints);
+            PointCloudInputPtr transformedterminalcloud(new PointCloudInput);
 
             //////////////////////////////////
 /*{{{*/
-            /*
             pcl::IterativeClosestPointWithNormals<PointNT, PointNT> icp;
             size_t rotnum = 4;
+            Eigen::Affine3f rotaffine;
+            rotaffine = Eigen::AngleAxisf(2.0*M_PI/rotnum,v);
             for (size_t irot = 0; irot < rotnum; irot++) {
                 pcl::console::print_highlight ("Starting terminal alignment... (%d)\n", irot);
-                Eigen::Affine3f rotaffine;
-                rotaffine = Eigen::AngleAxisf(2.0*M_PI/rotnum,v);
-                pcl::transformPointCloudWithNormals (*voxelterminalcloud, *voxelterminalcloud, rotaffine);
+                Eigen::Affine3f tnew;
+                tnew = t;
+                for (size_t i = 0; i < irot; i++) {
+                    tnew = tnew * rotaffine;
+                }
+
+                viewer_->removeCoordinateSystem();
+                viewer_->addCoordinateSystem(0.03, tnew);
+                pcl::copyPointCloud<PointNT>(*voxelterminalcloud, *transformedterminalcloud);
+                pcl::transformPointCloudWithNormals (*voxelterminalcloud, *transformedterminalcloud, tnew);
+
                 icp.setInputCloud(firstterminalscenepoints);
                 icp.setInputTarget(voxelterminalcloud);
                 // Set the max correspondence distance to 5cm (e.g., correspondences with higher distances will be ignored)
-                icp.setMaxCorrespondenceDistance (0.01);
+                icp.setMaxCorrespondenceDistance (0.1);
                 // Set the maximum number of iterations (criterion 1)
                 icp.setMaximumIterations (1000);
                 // Set the transformation epsilon (criterion 2)
-                icp.setTransformationEpsilon (1e-8);
+                icp.setTransformationEpsilon (1); //(1e-8);
                 // Set the euclidean distance difference epsilon (criterion 3)
-                icp.setEuclideanFitnessEpsilon (1);
+                icp.setEuclideanFitnessEpsilon (3); //(1);
 
                 PointCloudInput finalpoints;
                 icp.align(finalpoints);
@@ -809,28 +841,42 @@ public:
                 else
                 {
                     pcl::console::print_error ("Alignment failed!\n");
-                    t = t*rotaffine;
-                    vtkSmartPointer<vtkMatrix4x4> vtkmatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-                    vtkSmartPointer<vtkTransform> vtktransformation = vtkSmartPointer<vtkTransform>::New();
-                    for (size_t row = 0; row < 4; row++) {
-                        for (size_t col = 0; col < 4; col++) {
-                            vtkmatrix->SetElement(row,col,t(row,col));
-                        }
-                    }
-                    //pcl::visualization::PCLVisualizer::convertToVtkMatrix(t, vtkmatrix);
-                    vtktransformation->SetMatrix(&(*vtkmatrix));
-                    viewer_->removeShape("PLYModel");
-                    viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/lancable_terminal/lancable_terminal_fine_m.ply"), vtktransformation);
+                    //vtkSmartPointer<vtkMatrix4x4> vtkmatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+                    //vtkSmartPointer<vtkTransform> vtktransformation = vtkSmartPointer<vtkTransform>::New();
+                    //for (size_t row = 0; row < 4; row++) {
+                    //    for (size_t col = 0; col < 4; col++) {
+                    //        vtkmatrix->SetElement(row,col,t(row,col));
+                    //    }
+                    //}
+                    ////pcl::visualization::PCLVisualizer::convertToVtkMatrix(t, vtkmatrix);
+                    //vtktransformation->SetMatrix(&(*vtkmatrix));
+                    //viewer_->removeShape("PLYModel");
+                    //viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/lancable_terminal/lancable_terminal_fine_m.ply"), vtktransformation);
+
+                    std::cout << tnew.matrix() << std::endl;
+                    //pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(object_aligned, 0, 255, 0);
+                    //viewer_->addPointCloud<PointNT> (terminalcloudforvis, rgbfield, "firstterminal");
+                    //viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "firstterminal");
+                    viewer_->removePointCloud("failedterminal");
+                    viewer_->addPointCloud<PointNT> (transformedterminalcloud, rgbfield, "failedterminal");
+                    viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "failedterminal");
+
+                    std::stringstream filess;
+                    filess << "transformedterminalcloud" << irot << ".pcd";
+                    pcl::io::savePCDFileBinaryCompressed (filess.str(), *transformedterminalcloud);
+                    viewer_->spinOnce();
+                    //boost::this_thread::sleep(boost::posix_time::milliseconds(1000));
                     viewer_->spinOnce();
                     boost::this_thread::sleep(boost::posix_time::milliseconds(1000));
                 }
             }
-        */
             /*}}}*/
             ///////////////////////////////////////
-
+/*{{{*/
+/*
             pcl::console::print_highlight ("Starting terminal alignment...\n");
             pcl::SampleConsensusPrerejective<PointNT,PointNT,FeatureT> align;
+            PointCloudInputPtr transformedterminalcloud(new PointCloudInput);
             size_t rotnum = 4;
             for (size_t irot = 0; irot < rotnum; irot++) {
                 pcl::console::print_highlight ("Starting terminal alignment... (%d)\n", irot);
@@ -844,10 +890,9 @@ public:
                 }
 
                 viewer_->removeCoordinateSystem();
-                viewer_->addCoordinateSystem(0.1, tnew);
-                PointCloudInputPtr transformedterminalcloud(new PointCloudInput);
+                viewer_->addCoordinateSystem(0.03, tnew);
                 pcl::copyPointCloud<PointNT>(*voxelterminalcloud, *transformedterminalcloud);
-                pcl::transformPointCloudWithNormals (*transformedterminalcloud, *transformedterminalcloud, tnew); //TODO incorrect
+                pcl::transformPointCloudWithNormals (*voxelterminalcloud, *transformedterminalcloud, tnew);
 
                 align.setInputSource (transformedterminalcloud); //(voxelterminalcloud);
                 align.setSourceFeatures (terminal_features);
@@ -876,7 +921,7 @@ public:
                     pcl::console::print_info ("\n");
                     pcl::console::print_info ("t = < %0.3f, %0.3f, %0.3f >\n", transformation (0,3), transformation (1,3), transformation (2,3));
                     pcl::console::print_info ("\n");
-                    pcl::console::print_info ("Inliers: %i/%i\n", align.getInliers ().size (), voxelterminalcloud->size ());
+                    pcl::console::print_info ("Inliers: %i/%i\n", align.getInliers ().size (), transformedterminalcloud->size ());
 
                     // Show alignment
                     //PointCloudInputPtr terminalcloudforvis(new PointCloudInput());
@@ -902,26 +947,33 @@ public:
                 else
                 {
                     pcl::console::print_error ("Alignment failed!\n");
-                    vtkSmartPointer<vtkMatrix4x4> vtkmatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-                    vtkSmartPointer<vtkTransform> vtktransformation = vtkSmartPointer<vtkTransform>::New();
-                    for (size_t row = 0; row < 4; row++) {
-                        for (size_t col = 0; col < 4; col++) {
-                            vtkmatrix->SetElement(row,col,tnew(row,col));
-                        }
-                    }
-                    vtktransformation->SetMatrix(&(*vtkmatrix));
-                    viewer_->removeShape("PLYModel");
-                    viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/lancable_terminal/lancable_terminal_fine_m.ply"), vtktransformation);
-                    //pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(object_aligned, 0, 255, 0);
+                    //vtkSmartPointer<vtkMatrix4x4> vtkmatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+                    //vtkSmartPointer<vtkTransform> vtktransformation = vtkSmartPointer<vtkTransform>::New();
+                    //for (size_t row = 0; row < 4; row++) {
+                    //    for (size_t col = 0; col < 4; col++) {
+                    //        vtkmatrix->SetElement(row,col,tnew(row,col));
+                    //    }
+                    //}
+                    //vtktransformation->SetMatrix(&(*vtkmatrix));
+                    //viewer_->removeShape("PLYModel");
+                    //viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/cad/lancable_terminal/lancable_terminal_fine_m.ply"), vtktransformation);
+                    std::cout << tnew.matrix() << std::endl;
+                    pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(object_aligned, 0, 255, 0);
                     //viewer_->addPointCloud<PointNT> (terminalcloudforvis, rgbfield, "firstterminal");
-                    ////viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "firstterminal");
-                    //viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "firstterminal");
+                    //viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "firstterminal");
+                    viewer_->removePointCloud("failedterminal");
+                    viewer_->addPointCloud<PointNT> (transformedterminalcloud, rgbfield, "failedterminal");
+                    viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "failedterminal");
 
+                    std::stringstream filess;
+                    filess << "transformedterminalcloud" << irot << ".pcd";
+                    pcl::io::savePCDFileBinaryCompressed (filess.str(), *transformedterminalcloud);
                     viewer_->spinOnce();
                     //boost::this_thread::sleep(boost::posix_time::milliseconds(1000));
 
                 }
             }
+*//*}}}*/
         }
 
     }/*}}}*/
@@ -1026,7 +1078,8 @@ public:
     bool _validateCableSlice (CableSlice& slice) /*{{{*/
     {
         PCL_INFO("[_validateCableSlice] radius: %f, given: %f\n", slice.cylindercoeffs->values[6], cableradius_);
-        if(cableradius_* 0.65 > slice.cylindercoeffs->values[6] || slice.cylindercoeffs->values[6] > cableradius_* 1.35 ) {
+        //if(cableradius_* 0.65 > slice.cylindercoeffs->values[6] || slice.cylindercoeffs->values[6] > cableradius_* 1.35 ) {
+        if(cableradius_* 0.6 > slice.cylindercoeffs->values[6] || slice.cylindercoeffs->values[6] > cableradius_* 1.4 ) {
             return false;
         }
         return true;
