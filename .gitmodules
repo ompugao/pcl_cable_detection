@@ -1,3 +1,6 @@
 [submodule "3rdparty/msgpack_extension"]
 	path = 3rdparty/msgpack_extension
 	url = https://github.com/ompugao/msgpack_extension
+[submodule "3rdparty/picojson"]
+	path = 3rdparty/picojson
+	url = https://github.com/kazuho/picojson
