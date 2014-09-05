@@ -383,7 +383,7 @@ public:
 
         int cableindex;
         for (size_t isample = 0; isample < sampled_indices.points.size(); isample++) {
-            cableindex = cables.size()-1;
+            cableindex = cables.size();
             bool alreadyscanned = (scannedpointindicescache[sampled_indices.points[isample]].first != -1);
             std::stringstream textss;
             textss << "sampled_pt_" << isample;
@@ -408,6 +408,8 @@ public:
                     std::cout << "empty cable. skip"  << std::endl;
                     continue;
                 }
+                // comment out to disable cable reconnection
+/**/
                 int startintersectionsize[2] = {0,0};
                 int endintersectionsize[2] = {0,0};
                 bool swapcable[2] = {false, false};
@@ -556,7 +558,22 @@ public:
                     }
                     std::cout << "<<< swap cable at " << swapedcableindex << " and erase " << erasedcableindex << std::endl;
                 }
-                int hoge;
+/**/
+/*
+                int islice = 0;
+                for (typename std::list<CableSlicePtr>::iterator sliceitr = cable.begin(); sliceitr!= cable.end(); ++sliceitr, ++islice) {
+                    for (std::vector<int>::const_iterator pointindexitr = (*sliceitr)->searchedindices->indices.begin(); pointindexitr != (*sliceitr)->searchedindices->indices.end(); pointindexitr++ ) {
+                        
+                        scannedpointindicescache[(*pointindexitr)] = std::pair<int, int>(cableindex, islice);
+                    }
+                }
+                //if (1) {  // NOTE: for debug
+                if (cable.size() >= 1) {
+                    cables.resize(cables.size()+1);
+                    (*(cables.end()-1)).swap(cable);
+                    std::cout << "<<< append cable " << cableindex << std::endl;
+                }
+*/
             }
         }
     }/*}}}*/
@@ -813,6 +830,7 @@ public:
             viewer_->addArrow(pt0, pt1, r, g, b, false, cylindername);
 
             /* uncomment this line if you want to visualize the points which are detected as cable */
+            /*
             pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr extractedpoints(new pcl::PointCloud<pcl::PointXYZRGBNormal>());
             pcl::copyPointCloud (*input_, *((*itr)->searchedindices), *extractedpoints);
 
@@ -827,6 +845,7 @@ public:
             pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZRGBNormal> rgbfield(extractedpoints, r*255, g*255, b*255);
             viewer_->addPointCloud<pcl::PointXYZRGBNormal> (extractedpoints, rgbfield, slicepointsid.str());
             viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, slicepointsid.str());
+            */
 
             //viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_COLOR, 0.0,0.0,1.0, "sample cloud_2");
             //viewer_->addPointCloud(extractedpoints, slicepointsid.str());
