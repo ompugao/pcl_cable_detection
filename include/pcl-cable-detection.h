@@ -686,98 +686,170 @@ public:
         firstterminalcoeffs->values[7] += 0.010;
         firstterminalcoeffs->values[8] -= 0.005;
 
-        pcl::PointIndices::Ptr firstterminalscenepointsindices(new pcl::PointIndices());
+        _estimateTerminalFromInitialCoeffes(firstterminalcoeffs);
+    }/*}}}*/
+
+    void _estimateTerminalFromInitialCoeffes(pcl::ModelCoefficients::Ptr terminalcoeffs, std::string terminalindex = "")
+    {
+        pcl::PointIndices::Ptr terminalscenepointsindices(new pcl::PointIndices());
+        /*
         pcl::ModelCoefficients::Ptr cylmodel(new pcl::ModelCoefficients());
         cylmodel->values.resize(7);
         for (int i = 0; i < 7; i++) {
-            cylmodel->values[i] = firstterminalcoeffs->values[i];
+            cylmodel->values[i] = terminalcoeffs->values[i];
         }
         viewer_->removeShape("cylinder");
         viewer_->addCylinder(*cylmodel);
-        size_t points = _findScenePointIndicesInsideCylinder(firstterminalcoeffs, firstterminalscenepointsindices);
+        */
+        size_t points = _findScenePointIndicesInsideCylinder(terminalcoeffs, terminalscenepointsindices);
         if (points < 30) {
-            PCL_INFO("too few points at the first slice to detect terminal, points: %d\n", points);
+            PCL_INFO("too few points at the  slice to detect terminal, points: %d\n", points);
         } else {
             pcl::ExtractIndices<PointNT> extract;
-            PointCloudInputPtr firstterminalscenepoints(new PointCloudInput());
+            PointCloudInputPtr terminalscenepoints(new PointCloudInput());
             extract.setInputCloud (input_);
-            extract.setIndices (firstterminalscenepointsindices);
+            extract.setIndices (terminalscenepointsindices);
             //extract.setNegative (true);
-            extract.filter (*firstterminalscenepoints);
+            extract.filter (*terminalscenepoints);
 
             // visualize points/*{{{*/
             //pcl::visualization::PointCloudColorHandlerRGBField<pcl::PointXYZRGBNormal> rgbfield(extractedpoints);
-            pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(firstterminalscenepoints, 255, 0, 255);
+            pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(terminalscenepoints, 255, 0, 255);
 
-            viewer_->removePointCloud ("extracted_points");
-            viewer_->addPointCloud<PointNT> (firstterminalscenepoints, rgbfield,  "extracted_points");
-            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 5, "extracted_points");
-            std::cout << firstterminalcoeffs->values[0] << " "
-                << firstterminalcoeffs->values[1] << " "
-                << firstterminalcoeffs->values[2] << " " << std::endl;
-            std::cout << firstterminalcoeffs->values[3] << " "
-                << firstterminalcoeffs->values[4] << " "
-                << firstterminalcoeffs->values[5] << " " << std::endl;
-            std::cout << firstterminalcoeffs->values[6] << " "
-                << firstterminalcoeffs->values[7] << " "
-                << firstterminalcoeffs->values[8] << " " << std::endl;
+            viewer_->removePointCloud ("extracted_points" + terminalindex);
+            viewer_->addPointCloud<PointNT> (terminalscenepoints, rgbfield,  "extracted_points" + terminalindex);
+            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 5, "extracted_points" + terminalindex);
+            std::cout << terminalcoeffs->values[0] << " "
+                << terminalcoeffs->values[1] << " "
+                << terminalcoeffs->values[2] << " " << std::endl;
+            std::cout << terminalcoeffs->values[3] << " "
+                << terminalcoeffs->values[4] << " "
+                << terminalcoeffs->values[5] << " " << std::endl;
+            std::cout << terminalcoeffs->values[6] << " "
+                << terminalcoeffs->values[7] << " "
+                << terminalcoeffs->values[8] << " " << std::endl;
             //viewer_->addCylinder(*cylmodel);
             // end of visualize points/*}}}*/
 
             pcl::console::print_highlight ("Downsampling...\n");
             pcl::VoxelGrid<PointNT> grid;
             PointCloudInputPtr voxelterminalcloud(new PointCloudInput());
-            //PointCloudInputPtr voxelterminalcloudclosetoscene(new PointCloudInput());
-            double leafsize = 0.001;
+            double leafsize = 0.0005;
             grid.setLeafSize (leafsize, leafsize, leafsize);
-            grid.setInputCloud (firstterminalscenepoints);
-            grid.filter (*firstterminalscenepoints);
-            grid.setInputCloud (terminalcloud_);
-            grid.filter (*voxelterminalcloud);
-
-            // Estimate normals for scene
-            pcl::console::print_highlight ("Estimating scene normals...\n");
-            pcl::NormalEstimationOMP<PointNT,PointNT> nest;
-            nest.setRadiusSearch (2*leafsize);
-            nest.setInputCloud (firstterminalscenepoints);
-            nest.compute (*firstterminalscenepoints);
-            nest.setInputCloud (voxelterminalcloud);
-            nest.compute (*voxelterminalcloud);
+            grid.setInputCloud (terminalscenepoints);
+            grid.filter (*terminalscenepoints);
+            //grid.setInputCloud (terminalcloud_);
+            //grid.filter (*voxelterminalcloud);
 
             // compute cross product
             Eigen::Vector3f v(terminalcylindercoeffs_->values[3],terminalcylindercoeffs_->values[4],terminalcylindercoeffs_->values[5]);
+            Eigen::Vector3f dir(terminalcoeffs->values[3],terminalcoeffs->values[4],terminalcoeffs->values[5]);
             Eigen::Vector3f rotaxis = v.cross(dir);
             double rottheta = asin(rotaxis.norm());
             rotaxis.normalize();
             //Eigen::Transform<float, 3, Eigen::Affine> t; //same as the following one
             Eigen::Affine3f t;
-            t = Eigen::Translation<float, 3>(firstterminalcoeffs->values[0], firstterminalcoeffs->values[1], firstterminalcoeffs->values[2]) * Eigen::AngleAxisf(rottheta, rotaxis);
-            viewer_->addCoordinateSystem(0.1, t);
+            t = Eigen::Translation<float, 3>(terminalcoeffs->values[0], terminalcoeffs->values[1], terminalcoeffs->values[2]) * Eigen::AngleAxisf(rottheta, rotaxis);
+            //viewer_->addCoordinateSystem(0.1, t);
 
-            /*
-            FeatureCloudT::Ptr terminal_features (new FeatureCloudT); //should be a class member
-            FeatureCloudT::Ptr scene_features (new FeatureCloudT); //should be a class member
-            FeatureEstimationT fest;
-            
-            fest.setRadiusSearch (0.002);
-            fest.setInputCloud (firstterminalscenepoints);
-            fest.setInputNormals (firstterminalscenepoints);
-            fest.compute (*scene_features);
-            fest.setInputCloud (voxelterminalcloud);
-            fest.setInputNormals (voxelterminalcloud);
-            fest.compute (*terminal_features);
-            */
-            
-            pcl::io::savePCDFileBinaryCompressed ("firstterminalscenepoints.pcd", *firstterminalscenepoints);
             PointCloudInputPtr transformedterminalcloud(new PointCloudInput);
+            PointCloudInputPtr transformedterminalcloud_best(new PointCloudInput);
 
+            //pcl::copyPointCloud(*object, *object_xyz);
+            typename pcl::KdTreeFLANN<PointNT>::Ptr kdtree (new pcl::KdTreeFLANN<PointNT>());
+            pcl::ExtractIndices<PointNT> extractNT;
+            Eigen::Affine3f besttransform;
+            int maxinliernum = 0;
+            double maxscore = 0.0;
+            int rotnum = 360/5;
+            Eigen::Affine3f rotaffine;
+            rotaffine = Eigen::AngleAxisf(2.0*M_PI/rotnum,v);
+            for (size_t irot = 0; irot < rotnum; irot++) {
+                Eigen::Affine3f tnew;
+                tnew = t;
+                for (size_t i = 0; i < irot; i++) {
+                    tnew = tnew * rotaffine;
+                }
+                pcl::transformPointCloud (*terminalcloud_, *transformedterminalcloud, tnew);
+                PointCloudInputPtr transformedterminalcloud_voxel(new PointCloudInput);
+                // cut out hidden points
+                {
+                    pcl::VoxelGridOcclusionEstimation<PointNT> vgoe;
+                    vgoe.setInputCloud(transformedterminalcloud);
+                    vgoe.setLeafSize(leafsize, leafsize, leafsize);
+                    vgoe.initializeVoxelGrid();
+                    *transformedterminalcloud_voxel = vgoe.getFilteredPointCloud();
+                    pcl::PointIndices::Ptr visibleindices(new pcl::PointIndices);
+                    for (size_t ipoint = 0; ipoint < transformedterminalcloud_voxel->points.size(); ipoint++) {
+                        PointNT& pt = transformedterminalcloud_voxel->points[ipoint];
+                        Eigen::Vector3i ijk = vgoe.getGridCoordinates(pt.x, pt.y, pt.z);
+                        int out_state;
+                        int status = vgoe.occlusionEstimation(out_state, ijk); //0 = free, 1 = occluded
+                        if (out_state == 0) {
+                            visibleindices->indices.push_back(ipoint);
+                        }
+                    }
+                    extractNT.setInputCloud (transformedterminalcloud_voxel);
+                    extractNT.setIndices (visibleindices);
+                    //extractNT.setNegative (true);
+                    extractNT.filter (*transformedterminalcloud);
+                }
+
+                // compute inliers
+                kdtree->setInputCloud(transformedterminalcloud);
+                std::vector<int> k_indices;
+                std::vector<float> k_sqr_distances;
+                PointNT pt;
+                std::vector<int> inliers;
+                for (size_t iscenepoint = 0; iscenepoint < terminalscenepoints->points.size(); iscenepoint++) {
+                    pt.x = terminalscenepoints->points[iscenepoint].x;
+                    pt.y = terminalscenepoints->points[iscenepoint].y;
+                    pt.z = terminalscenepoints->points[iscenepoint].z;
+                    kdtree->radiusSearch (pt, leafsize*0.5, k_indices, k_sqr_distances);
+                    if (k_indices.size() > 0) {
+                        inliers.push_back(iscenepoint);
+                    }
+                }
+                viewer_->removePointCloud("object_transformed" + terminalindex);
+                viewer_->addPointCloud(transformedterminalcloud, ColorHandlerNT (transformedterminalcloud, 255.0, 0.0, 0.0), "object_transformed" + terminalindex);
+                viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "object_transformed" + terminalindex);
+                viewer_->spinOnce();
+                boost::this_thread::sleep(boost::posix_time::milliseconds(100));
+                pcl::console::print_highlight("irot: %d, inliers: %d/%d(scene), %d(visible object), %d(object)\n", irot, inliers.size(), terminalscenepoints->points.size(), transformedterminalcloud->points.size(), transformedterminalcloud_voxel->points.size());
+                if (inliers.size() > maxinliernum) {
+                    besttransform = tnew;
+                    maxinliernum = inliers.size();
+                    pcl::copyPointCloud(*transformedterminalcloud, *transformedterminalcloud_best);
+                }
+            }
+            viewer_->addCoordinateSystem(0.05, besttransform);
+            pcl::transformPointCloudWithNormals(*terminalcloud_, *transformedterminalcloud, besttransform);
+            viewer_->removePointCloud("object_transformed" + terminalindex);
+            viewer_->addPointCloud(transformedterminalcloud, ColorHandlerNT (transformedterminalcloud, 255.0, 0.0, 0.0), "object_transformed" + terminalindex);
             //////////////////////////////////
+            // icp
 /*{{{*/
+/*
             //pcl::IterativeClosestPointWithNormals<PointNT, PointNT> icp;
             pcl::GeneralizedIterativeClosestPoint<PointNT, PointNT> icp;
             size_t rotnum = 4;
             Eigen::Affine3f rotaffine;
             rotaffine = Eigen::AngleAxisf(2.0*M_PI/rotnum,v);
+
+            //icp.setInputTarget(transformedterminalcloud);
+            // Set the max correspondence distance to 5cm (e.g., correspondences with higher distances will be ignored)
+            //icp.setMaxCorrespondenceDistance (0.02);
+            // Set the maximum number of iterations (criterion 1)
+            icp.setMaximumIterations (100);
+            // Set the transformation epsilon (criterion 2)
+            icp.setTransformationEpsilon (0.00001); //(1e-8);
+            //icp.setRotationEpsilon (0.001);
+            // Set the euclidean distance difference epsilon (criterion 3)
+            //icp.setEuclideanFitnessEpsilon (0.000001); //(1);
+
+            icp.setRANSACOutlierRejectionThreshold(0.0005);
+
+
             for (size_t irot = 0; irot < rotnum; irot++) {
                 pcl::console::print_highlight ("Starting terminal alignment... (%d)\n", irot);
                 Eigen::Affine3f tnew;
@@ -790,27 +862,72 @@ public:
                 viewer_->addCoordinateSystem(0.03, tnew);
                 pcl::copyPointCloud<PointNT>(*voxelterminalcloud, *transformedterminalcloud);
                 pcl::transformPointCloudWithNormals (*voxelterminalcloud, *transformedterminalcloud, tnew);
+                pcl::io::savePCDFileBinaryCompressed ("terminalscenepoints.pcd", *terminalscenepoints);
+                std::stringstream filess;
+                filess << "transformedterminalcloud" << irot << ".pcd";
+                pcl::io::savePCDFileBinaryCompressed (filess.str(), *transformedterminalcloud);
 
-                icp.setInputCloud(firstterminalscenepoints);
-                icp.setInputTarget(transformedterminalcloud);
-                // Set the max correspondence distance to 5cm (e.g., correspondences with higher distances will be ignored)
-                icp.setMaxCorrespondenceDistance (0.1);
-                // Set the maximum number of iterations (criterion 1)
-                icp.setMaximumIterations (1000);
-                // Set the transformation epsilon (criterion 2)
-                icp.setTransformationEpsilon (1); //(1e-8);
-                // Set the euclidean distance difference epsilon (criterion 3)
-                icp.setEuclideanFitnessEpsilon (3); //(1);
+                // cut out hidden points
+                {
+                    PointCloudInputPtr flattenedtransformedterminalcloud(new PointCloudInput);
+                    pcl::copyPointCloud(*transformedterminalcloud, *flattenedtransformedterminalcloud);
+                    for (size_t i = 0; i < flattenedtransformedterminalcloud->points.size(); i++) {
+                        flattenedtransformedterminalcloud->points[i].z = 0.0;
+                    }
 
+                    pcl::PointIndices::Ptr visibleindices(new pcl::PointIndices());
+                    std::vector<bool> visiblecandidateindices;
+                    visiblecandidateindices.resize(transformedterminalcloud->points.size());
+                    std::fill(visiblecandidateindices.begin(), visiblecandidateindices.end(), true);
+
+                    typename pcl::KdTreeFLANN<PointNT>::Ptr kdtree (new pcl::KdTreeFLANN<PointNT>());
+                    kdtree->setInputCloud(flattenedtransformedterminalcloud);
+                    std::vector<int> k_indices;
+                    std::vector<float> k_sqr_distances;
+
+                    float zvisiblethreshold = 6*leafsize;
+                    for (size_t i = 0; i < flattenedtransformedterminalcloud->points.size(); i++) {
+
+                        if(visiblecandidateindices[i]) {
+                            kdtree->radiusSearch (flattenedtransformedterminalcloud->points[i], leafsize, k_indices, k_sqr_distances);
+                            for (size_t j = 0; j < k_indices.size(); j++) {
+                                if (transformedterminalcloud->points[i].z - transformedterminalcloud->points[j].z > zvisiblethreshold) {
+                                    visiblecandidateindices[i] = false;
+                                }
+                                if (transformedterminalcloud->points[i].z - transformedterminalcloud->points[j].z < zvisiblethreshold) {
+                                    visiblecandidateindices[j] = false;
+                                }
+                            }
+                        }
+                    }
+
+                    for (size_t i = 0; i < visiblecandidateindices.size(); i++) {
+                        if (visiblecandidateindices[i]) {
+                            visibleindices->indices.push_back(i);
+                        }
+                    }
+                    extract.setInputCloud (transformedterminalcloud);
+                    extract.setIndices (visibleindices);
+                    //extract.setNegative (true);
+                    extract.filter (*transformedterminalcloud);
+                    std::stringstream filess2;
+                    filess2 << "visible_transformedterminalcloud" << irot << ".pcd";
+                    pcl::io::savePCDFileBinaryCompressed (filess2.str(), *transformedterminalcloud);
+                }
+
+                //icp.setInputCloud(terminalscenepoints);
+                //icp.setInputTarget(transformedterminalcloud);
+                icp.setInputCloud(transformedterminalcloud);
+                icp.setInputTarget(terminalscenepoints);
                 PointCloudInput finalpoints;
-                icp.align(finalpoints);
+                icp.align(finalpoints);//, tnew.matrix());
                 std::cout << "has converged:" << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl;
 
                 if (icp.hasConverged ())
                 {
                     // Print results
                     printf ("\n");
-                    Eigen::Matrix4f transformation = icp.getFinalTransformation ();
+                    Eigen::Matrix4f transformation = icp.getFinalTransformation () ;
                     pcl::console::print_info ("    | %6.3f %6.3f %6.3f | \n", transformation (0,0), transformation (0,1), transformation (0,2));
                     pcl::console::print_info ("R = | %6.3f %6.3f %6.3f | \n", transformation (1,0), transformation (1,1), transformation (1,2));
                     pcl::console::print_info ("    | %6.3f %6.3f %6.3f | \n", transformation (2,0), transformation (2,1), transformation (2,2));
@@ -820,24 +937,22 @@ public:
                     //pcl::console::print_info ("Inliers: %i/%i\n", icp.getInliers ().size (), voxelterminalcloud->size ());
 
                     // Show alignment
+                    //std::cout << tnew.matrix() << std::endl;
                     PointCloudInputPtr terminalcloudforvis(new PointCloudInput());
-                    //pcl::visualization::PointCloudColorHandlerRGBField<PointNT> rgbfield(terminalcloud_);
-                    //pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZRGBNormal> rgbfield(extractedpoints, 0, 255, 0);
-                    //pcl::copyPointCloud(terminalcloud_, terminalcloudforvis);
-
-                    //pcl::transformPointCloudWithNormals (*terminalcloud_, *terminalcloudforvis, transformation);
-                    //pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(object_aligned, 0, 255, 0);
-                    //viewer_->addPointCloud<PointNT> (terminalcloudforvis, rgbfield, "firstterminal");
-                    ////viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "firstterminal");
-                    //viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "firstterminal");
+                    terminalcloudforvis->points.resize(terminalcloud_->points.size());
+                    //pcl::visualization::PointCloudColorHandlerRGBField<PointNT> rgbfield(terminalcloudforvis);
+                    pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(terminalcloudforvis, 0, 255, 0);
+                    pcl::transformPointCloudWithNormals (*voxelterminalcloud, *terminalcloudforvis, tnew * transformation);
+                    viewer_->removePointCloud("terminal");
+                    viewer_->addPointCloud<PointNT> (terminalcloudforvis, rgbfield, "terminal");
+                    viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "terminal");
 
                     //vtkSmartPointer<vtkMatrix4x4> vtkmatrix = vtkSmartPointer<vtkMatrix4x4>::New();
                     //vtkSmartPointer<vtkTransform> vtktransformation = vtkSmartPointer<vtkTransform>::New();
-                    //pcl::visualization::PCLVisualizer::convertToVtkMatrix(transformation, vtkmatrix);
+                    //pcl::visualization::PCLVisualizer::convertToVtkMatrix(tnew*transformation, vtkmatrix);
                     //vtktransformation->SetMatrix(&(*vtkmatrix));
                     //viewer_->removeShape("PLYModel");
                     //viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/cad/lancable_terminal/lancable_terminal_fine_m.ply"), vtktransformation);
-                    break;
 
                 }
                 else
@@ -856,9 +971,9 @@ public:
                     //viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/lancable_terminal/lancable_terminal_fine_m.ply"), vtktransformation);
 
                     std::cout << tnew.matrix() << std::endl;
-                    //pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(object_aligned, 0, 255, 0);
-                    //viewer_->addPointCloud<PointNT> (terminalcloudforvis, rgbfield, "firstterminal");
-                    //viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "firstterminal");
+                    pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(transformedterminalcloud, 0, 255, 0);
+                    //viewer_->addPointCloud<PointNT> (terminalcloudforvis, rgbfield, "terminal");
+                    //viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "terminal");
                     viewer_->removePointCloud("failedterminal");
                     viewer_->addPointCloud<PointNT> (transformedterminalcloud, rgbfield, "failedterminal");
                     viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "failedterminal");
@@ -872,14 +987,40 @@ public:
                     boost::this_thread::sleep(boost::posix_time::milliseconds(1000));
                 }
             }
-            /*}}}*/
+            */
+/*}}}*/
+            // alignment
             ///////////////////////////////////////
 /*{{{*/
 /*
+            FeatureCloudT::Ptr terminal_features (new FeatureCloudT); //should be a class member
+            FeatureCloudT::Ptr scene_features (new FeatureCloudT); //should be a class member
+            FeatureEstimationT fest;
+            
+            fest.setRadiusSearch (0.002);
+            fest.setInputCloud (terminalscenepoints);
+            fest.setInputNormals (terminalscenepoints);
+            fest.compute (*scene_features);
+            fest.setInputCloud (voxelterminalcloud);
+            fest.setInputNormals (voxelterminalcloud);
+            fest.compute (*terminal_features);
+            
             pcl::console::print_highlight ("Starting terminal alignment...\n");
             pcl::SampleConsensusPrerejective<PointNT,PointNT,FeatureT> align;
-            PointCloudInputPtr transformedterminalcloud(new PointCloudInput);
+            PointCloudInputPtr object_aligned(new PointCloudInput());
+
             size_t rotnum = 4;
+            align.setInputSource (voxelterminalcloud);
+            align.setSourceFeatures (terminal_features);
+            align.setInputTarget (terminalscenepoints);
+            align.setTargetFeatures (scene_features);
+            align.setMaximumIterations (10000); // Number of RANSAC iterations
+            align.setNumberOfSamples (3); // Number of points to sample for generating/prerejecting a pose
+            align.setCorrespondenceRandomness (2); // Number of nearest features to use
+            align.setSimilarityThreshold (0.9f); // Polygonal edge length similarity threshold
+            align.setMaxCorrespondenceDistance(1.5f * leafsize); // Inlier threshold
+            align.setInlierFraction (0.1f);//(0.25f); // Required inlier fraction for accepting a pose hypothesis
+
             for (size_t irot = 0; irot < rotnum; irot++) {
                 pcl::console::print_highlight ("Starting terminal alignment... (%d)\n", irot);
 
@@ -893,23 +1034,12 @@ public:
 
                 viewer_->removeCoordinateSystem();
                 viewer_->addCoordinateSystem(0.03, tnew);
-                pcl::copyPointCloud<PointNT>(*voxelterminalcloud, *transformedterminalcloud);
-                pcl::transformPointCloudWithNormals (*voxelterminalcloud, *transformedterminalcloud, tnew);
+                //pcl::copyPointCloud<PointNT>(*voxelterminalcloud, *transformedterminalcloud);
+                //pcl::transformPointCloudWithNormals (*voxelterminalcloud, *transformedterminalcloud, tnew);
 
-                align.setInputSource (transformedterminalcloud); //(voxelterminalcloud);
-                align.setSourceFeatures (terminal_features);
-                align.setInputTarget (firstterminalscenepoints);
-                align.setTargetFeatures (scene_features);
-                align.setMaximumIterations (10000); // Number of RANSAC iterations
-                align.setNumberOfSamples (3); // Number of points to sample for generating/prerejecting a pose
-                align.setCorrespondenceRandomness (2); // Number of nearest features to use
-                align.setSimilarityThreshold (0.9f); // Polygonal edge length similarity threshold
-                align.setMaxCorrespondenceDistance(1.5f * leafsize); // Inlier threshold
-                align.setInlierFraction (0.4f);//(0.25f); // Required inlier fraction for accepting a pose hypothesis
-                PointCloudInputPtr object_aligned(new PointCloudInput());
                 {
                     pcl::ScopeTime t("Alignment");
-                    align.align (*object_aligned);
+                    align.align (*object_aligned, tnew.matrix());
                 }
 
                 if (align.hasConverged ())
@@ -923,27 +1053,28 @@ public:
                     pcl::console::print_info ("\n");
                     pcl::console::print_info ("t = < %0.3f, %0.3f, %0.3f >\n", transformation (0,3), transformation (1,3), transformation (2,3));
                     pcl::console::print_info ("\n");
-                    pcl::console::print_info ("Inliers: %i/%i\n", align.getInliers ().size (), transformedterminalcloud->size ());
+                    pcl::console::print_info ("Inliers: %i/%i\n", align.getInliers ().size (), voxelterminalcloud->size ());
 
                     // Show alignment
-                    //PointCloudInputPtr terminalcloudforvis(new PointCloudInput());
-                    //pcl::visualization::PointCloudColorHandlerRGBField<PointNT> rgbfield(terminalcloud_);
-                    //pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZRGBNormal> rgbfield(extractedpoints, 0, 255, 0);
-                    //pcl::copyPointCloud(terminalcloud_, terminalcloudforvis);
+                    PointCloudInputPtr terminalcloudforvis(new PointCloudInput());
+                    pcl::visualization::PointCloudColorHandlerRGBField<PointNT> rgbfield(terminalcloud_);
+                    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZRGBNormal> rgbfield(extractedpoints, 0, 255, 0);
+                    pcl::copyPointCloud(terminalcloud_, terminalcloudforvis);
 
-                    //pcl::transformPointCloudWithNormals (*terminalcloud_, *terminalcloudforvis, transformation);
-                    //pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(object_aligned, 0, 255, 0);
-                    //viewer_->addPointCloud<PointNT> (terminalcloudforvis, rgbfield, "firstterminal");
-                    ////viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "firstterminal");
-                    //viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "firstterminal");
+                    pcl::transformPointCloudWithNormals (*terminalcloud_, *terminalcloudforvis, transformation);
+                    pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(object_aligned, 0, 255, 0);
+                    viewer_->addPointCloud<PointNT> (terminalcloudforvis, rgbfield, "terminal");
+                    //viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "terminal");
+                    viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "terminal");
 
-                    vtkSmartPointer<vtkMatrix4x4> vtkmatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-                    vtkSmartPointer<vtkTransform> vtktransformation = vtkSmartPointer<vtkTransform>::New();
-                    pcl::visualization::PCLVisualizer::convertToVtkMatrix(tnew.inverse()*transformation, vtkmatrix);
-                    vtktransformation->SetMatrix(&(*vtkmatrix));
-                    viewer_->removeShape("PLYModel");
-                    viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/lancable_terminal/lancable_terminal_fine_m.ply"),
-                            vtktransformation);
+                    //vtkSmartPointer<vtkMatrix4x4> vtkmatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+                    //vtkSmartPointer<vtkTransform> vtktransformation = vtkSmartPointer<vtkTransform>::New();
+                    //pcl::visualization::PCLVisualizer::convertToVtkMatrix(transformation, vtkmatrix);
+                    //vtktransformation->SetMatrix(&(*vtkmatrix));
+                    //std::stringstream plyname;
+                    //plyname << "plymodel_" << rand();
+                    //viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/cad/lancable_terminal/lancable_terminal_fine_m.ply"),
+                            //vtktransformation, plyname.str());
                     break;
                 }
                 else
@@ -960,11 +1091,12 @@ public:
                     //viewer_->removeShape("PLYModel");
                     //viewer_->addModelFromPLYFile (std::string("/home/sifi/Dropbox/mujin/cad/lancable_terminal/lancable_terminal_fine_m.ply"), vtktransformation);
                     std::cout << tnew.matrix() << std::endl;
-                    pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(object_aligned, 0, 255, 0);
-                    //viewer_->addPointCloud<PointNT> (terminalcloudforvis, rgbfield, "firstterminal");
-                    //viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "firstterminal");
+                    pcl::visualization::PointCloudColorHandlerCustom<PointNT> rgbfield(transformedterminalcloud, 0, 255, 0);
+                    //viewer_->addPointCloud<PointNT> (terminalcloudforvis, rgbfield, "terminal");
+                    //viewer_->addPointCloud<PointNT> (object_aligned, rgbfield, "terminal");
                     viewer_->removePointCloud("failedterminal");
-                    viewer_->addPointCloud<PointNT> (transformedterminalcloud, rgbfield, "failedterminal");
+                    pcl::transformPointCloudWithNormals(*voxelterminalcloud, *transformedterminalcloud, tnew);
+                    viewer_->addPointCloud<PointNT> (transformedterminalcloud, "failedterminal");
                     viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "failedterminal");
 
                     std::stringstream filess;
@@ -975,10 +1107,11 @@ public:
 
                 }
             }
-*//*}}}*/
+*/
+/*}}}*/
         }
 
-    }/*}}}*/
+    }
 
     /* 
      * param[in] terminalcylindercoeffs: terminalcylindercoeffs
