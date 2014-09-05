@@ -13,6 +13,7 @@
 #include <pcl/features/normal_3d_omp.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/filters/voxel_grid_occlusion_estimation.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/kdtree/kdtree.h>
 #include <pcl/kdtree/kdtree_flann.h>
@@ -27,11 +28,20 @@
 #include <pcl/search/pcl_search.h>
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/visualization/cloud_viewer.h>
-#include <algorithm> //copy
+#include <algorithm> //copy,fill
 #include <iterator> //back_inserter
 #include <cstdlib> //random
 #include <cmath>
 #include <vtkTransform.h>
+
+template<class T>
+bool pairCompare1(const std::pair<T, T> & x, const std::pair<T, T> & y) {
+  return x.first < y.first; 
+}
+template<class T>
+bool pairCompare2(const std::pair<T, T> & x, const std::pair<T, T> & y) {
+  return x.second < y.second; 
+}
 
 namespace pcl_cable_detection {
 
@@ -177,6 +187,7 @@ public:
 
     typedef typename pcl::PointCloud<PointNT> PointCloudInput;
     typedef typename pcl::PointCloud<PointNT>::Ptr PointCloudInputPtr;
+    typedef pcl::visualization::PointCloudColorHandlerCustom<PointNT> ColorHandlerNT;
     typedef pcl::FPFHSignature33 FeatureT;
     typedef pcl::FPFHEstimationOMP<PointNT,PointNT,FeatureT> FeatureEstimationT;
     typedef pcl::PointCloud<FeatureT> FeatureCloudT;
@@ -192,6 +203,7 @@ public:
         terminalcloud_ = terminalcloud;
         terminalcylindercoeffs_.reset(new pcl::ModelCoefficients());
         _computeBoundingCylinder(terminalcloud_, terminalaxis, terminalcylindercoeffs_);
+        srand (time(NULL));
     }
     // setter
     /*{{{*/
@@ -334,7 +346,9 @@ public:
         selectedpoint.x = input_->points[idx].x;
         selectedpoint.y = input_->points[idx].y;
         selectedpoint.z = input_->points[idx].z;
-        Cable cable = findCableFromPoint(selectedpoint);
+        std::vector<Cable> dummycables;
+        std::vector<EndPointInfo> endpointinfos;
+        Cable cable = findCableFromPoint(selectedpoint, dummycables, endpointinfos);
         // do not lock viewer mutex!!! the function who calls point_picking_callback itself is locking mutex
         viewer_->removeAllShapes();
         visualizeCable(cable);
@@ -361,15 +375,16 @@ public:
             viewer_->spinOnce();
         }
 
-        std::vector<int> scannedpointindicescache;
+        std::vector<std::pair<int, int> > scannedpointindicescache; // cableindex, sliceindex
         scannedpointindicescache.resize(input_->points.size());
-        std::fill (scannedpointindicescache.begin(),scannedpointindicescache.end(),-1);
+        std::fill (scannedpointindicescache.begin(),scannedpointindicescache.end(),std::pair<int, int>(-1, -1));
         std::vector<int> ignoreindices;
         ignoreindices.resize(1);
 
-        int cableindex = 0;
+        int cableindex;
         for (size_t isample = 0; isample < sampled_indices.points.size(); isample++) {
-            bool alreadyscanned = (scannedpointindicescache[sampled_indices.points[isample]] != -1);
+            cableindex = cables.size()-1;
+            bool alreadyscanned = (scannedpointindicescache[sampled_indices.points[isample]].first != -1);
             std::stringstream textss;
             textss << "sampled_pt_" << isample;
             if (!!viewer_) {
@@ -384,26 +399,180 @@ public:
                 eachpt.y = sampledpoints->points[isample].y;
                 eachpt.z = sampledpoints->points[isample].z;
 
-                PCL_INFO(std::string(std::string(">>> find cable from sampled_pt ") + textss.str() + std::string("\n")).c_str());
+                pcl::console::print_highlight(std::string(std::string("-----  find cable from ") + textss.str() + std::string("-----\n")).c_str());
                 ignoreindices[0] = cableindex;
-                Cable cable = findCableFromPoint(eachpt, scannedpointindicescache, ignoreindices);
+                std::vector<EndPointInfo> endpointinfos(2);
+                Cable cable = findCableFromPoint(eachpt, cables, endpointinfos, scannedpointindicescache, ignoreindices);
 
-                if (1) { //(cable.size() > 1) {
-                    cables.push_back(cable);
-                    cableindex++;
-                    for (typename std::list<CableSlicePtr>::iterator sliceitr = cable.begin(); sliceitr!= cable.end(); ++sliceitr) {
-                        for (std::vector<int>::const_iterator pointindexitr = (*sliceitr)->searchedindices->indices.begin(); pointindexitr != (*sliceitr)->searchedindices->indices.end(); pointindexitr++ ) {
-                            
-                            scannedpointindicescache[(*pointindexitr)] = cableindex;
+                if (cable.size() == 0) {
+                    std::cout << "empty cable. skip"  << std::endl;
+                    continue;
+                }
+                int startintersectionsize[2] = {0,0};
+                int endintersectionsize[2] = {0,0};
+                bool swapcable[2] = {false, false};
+                int leastintersectionsize = 5;
+                if (endpointinfos[0].cablesliceindex != -1) {
+                    std::cout << "!! may be class " << endpointinfos[0].cablesliceindex << "?" << std::endl;
+                    std::cout << "!! endpointinfos[0]: " << endpointinfos[0].pointindices.size() << std::endl;
+                    Cable existingcable = *boost::next(cables.begin(), endpointinfos[0].cablesliceindex); // an existing cable which locates at the start point of the detected cable
+                    int cablelength = existingcable.size();
+                    for (size_t ipoint = 0; ipoint < endpointinfos[0].pointindices.size(); ipoint++) {
+                        if (scannedpointindicescache[endpointinfos[0].pointindices[ipoint]].second == 0)
+                        {
+                            startintersectionsize[0]++;
+                        }
+                        if (scannedpointindicescache[endpointinfos[0].pointindices[ipoint]].second == cablelength-1)
+                        {
+                            endintersectionsize[0]++;
                         }
                     }
+                    std::cout << "!! " << endpointinfos[0].cablesliceindex << ", " << cablelength << ", " << startintersectionsize[0] << ", " << endintersectionsize[0] << std::endl;
+                    if (startintersectionsize[0] > leastintersectionsize)
+                    {
+                        // [(end) ... existing (start)] <-> [(start) current ... (end)]
+                        Eigen::Vector3f axis1((*cable.begin())->cylindercoeffs->values[3],(*cable.begin())->cylindercoeffs->values[4],(*cable.begin())->cylindercoeffs->values[5]);
+                        Eigen::Vector3f axis2((*existingcable.begin())->cylindercoeffs->values[3],(*existingcable.begin())->cylindercoeffs->values[4],(*existingcable.begin())->cylindercoeffs->values[5]);
+                        int flipdir = -1;
+                        if (axis1.dot(axis2) > 0 ) {
+                            flipdir = 1; // for the case when the length of the existing cable is 1
+                        }
+                        for (typename std::list<CableSlicePtr>::iterator itrslice = existingcable.begin(); itrslice != existingcable.end(); ++itrslice) {
+                            (*itrslice)->cylindercoeffs->values[3]*= flipdir;
+                            (*itrslice)->cylindercoeffs->values[4]*= flipdir;
+                            (*itrslice)->cylindercoeffs->values[5]*= flipdir;
+                            cable.push_front(*itrslice);
+                        }
+                        swapcable[0] = true;
+                    }
+                    else if (endintersectionsize[0] > leastintersectionsize)
+                    {
+                        // [(start) ... existing (end)] <-> [(start) current ... (end)]
+                        for (typename std::list<CableSlicePtr>::reverse_iterator itrslice = existingcable.rbegin(); itrslice != existingcable.rend(); ++itrslice) {
+                            cable.push_front(*itrslice);
+                        }
+                        swapcable[0] = true;
+                    }
                 }
+
+                if (endpointinfos[1].cablesliceindex != -1) {
+                    std::cout << "!! may be class " << endpointinfos[1].cablesliceindex << "?" << std::endl;
+                    std::cout << "!! endpointinfos[1]: " << endpointinfos[1].pointindices.size() << std::endl;
+                    Cable existingcable = *boost::next(cables.begin(), endpointinfos[1].cablesliceindex); // an existing cable which locates at the start point of the detected cable
+                    int cablelength = existingcable.size();
+                    for (size_t ipoint = 0; ipoint < endpointinfos[1].pointindices.size(); ipoint++) {
+                        if (scannedpointindicescache[endpointinfos[1].pointindices[ipoint]].second == 0)
+                        {
+                            startintersectionsize[1]++;
+                        }
+                        if (scannedpointindicescache[endpointinfos[1].pointindices[ipoint]].second == cablelength-1)
+                        {
+                            endintersectionsize[1]++;
+                        }
+                    }
+                    std::cout << "!! " << endpointinfos[1].cablesliceindex << ", " << cablelength << ", " << startintersectionsize[1] << ", " << endintersectionsize[1] << std::endl;
+                    if (startintersectionsize[1] > leastintersectionsize)
+                    {
+                        // [(start) ... current (end)] <-> [(start) existing ... (end)]
+                        Eigen::Vector3f axis1((*(boost::prior(cable.end())))->cylindercoeffs->values[3],(*(boost::prior(cable.end())))->cylindercoeffs->values[4],(*(boost::prior(cable.end())))->cylindercoeffs->values[5]);
+                        Eigen::Vector3f axis2((*existingcable.begin())->cylindercoeffs->values[3],(*existingcable.begin())->cylindercoeffs->values[4],(*existingcable.begin())->cylindercoeffs->values[5]);
+                        int flipdir = 1;
+                        if (axis1.dot(axis2) < 0 ) {
+                            flipdir = -1;
+                        }
+                        for (typename std::list<CableSlicePtr>::iterator itrslice = existingcable.begin(); itrslice != existingcable.end(); ++itrslice) {
+                            cable.push_back(*itrslice);
+                        }
+                        swapcable[1] = true;
+                    }
+                    else if (endintersectionsize[1] > leastintersectionsize)
+                    {
+                        // [(start) ... current (end)] <-> [(end) existing ... (start)]
+                        for (typename std::list<CableSlicePtr>::reverse_iterator itrslice = existingcable.rbegin(); itrslice != existingcable.rend(); ++itrslice) {
+                            (*itrslice)->cylindercoeffs->values[3]*= -1;
+                            (*itrslice)->cylindercoeffs->values[4]*= -1;
+                            (*itrslice)->cylindercoeffs->values[5]*= -1;
+                            cable.push_back(*itrslice);
+                        }
+                        swapcable[1] = true;
+                    }
+                }
+
+                // update cache
+                int currentcableindex;
+                if (!swapcable[0] && !swapcable[1]) {
+                    currentcableindex = cableindex;
+                }
+                else if (swapcable[0] && !swapcable[1]) {
+                    currentcableindex = endpointinfos[0].cablesliceindex;
+                }
+                else if (!swapcable[0] && swapcable[1]) {
+                    currentcableindex = endpointinfos[1].cablesliceindex;
+                }
+                else if (swapcable[0] && swapcable[1]) {
+                    currentcableindex = std::min(endpointinfos[0].cablesliceindex, endpointinfos[1].cablesliceindex);
+                }
+
+                std::cout << cables.size() << std::endl;
+                std::cout << (*std::max_element(scannedpointindicescache.begin(), scannedpointindicescache.end(), pairCompare1<int>)).first << std::endl;
+                //
+                int islice = 0;
+                for (typename std::list<CableSlicePtr>::iterator sliceitr = cable.begin(); sliceitr!= cable.end(); ++sliceitr, ++islice) {
+                    for (std::vector<int>::const_iterator pointindexitr = (*sliceitr)->searchedindices->indices.begin(); pointindexitr != (*sliceitr)->searchedindices->indices.end(); pointindexitr++ ) {
+                        
+                        scannedpointindicescache[(*pointindexitr)] = std::pair<int, int>(currentcableindex, islice);
+                    }
+                }
+                std::cout << (*std::max_element(scannedpointindicescache.begin(), scannedpointindicescache.end(), pairCompare1<int>)).first << std::endl;
+                //
+                if (!swapcable[0] && !swapcable[1])
+                {
+                    //if (cable.size() > 1) {
+                    //if (1) {  // NOTE: for debug
+                    cables.resize(cables.size()+1);
+                    (*(cables.end()-1)).swap(cable);
+                    std::cout << "<<< append cable " << cableindex << std::endl;
+                }
+                else if (swapcable[0] && !swapcable[1]) {
+                    (*boost::next(cables.begin(), endpointinfos[0].cablesliceindex)).swap(cable);
+                    std::cout << "<<< swap cable at " << endpointinfos[0].cablesliceindex<< std::endl;
+                }
+                else if (!swapcable[0] && swapcable[1]) {
+                    (*boost::next(cables.begin(), endpointinfos[1].cablesliceindex)).swap(cable);
+                    std::cout << "<<< swap cable at " << endpointinfos[1].cablesliceindex<< std::endl;
+                }
+                else if (swapcable[0] && swapcable[1]) {
+                    int swapedcableindex = std::min(endpointinfos[0].cablesliceindex, endpointinfos[1].cablesliceindex);
+                    int erasedcableindex = std::max(endpointinfos[0].cablesliceindex, endpointinfos[1].cablesliceindex);
+                    (*boost::next(cables.begin(), swapedcableindex)).swap(cable);
+                    typename std::vector<Cable>::iterator itrcable = cables.begin();
+                    std::advance(itrcable, erasedcableindex);
+                    cables.erase(itrcable);
+                    int islice = 0;
+                    for (typename std::vector<std::pair<int, int> >::iterator itrpicache = scannedpointindicescache.begin(); itrpicache!= scannedpointindicescache.end(); ++itrpicache) {
+                        if (itrpicache->first > erasedcableindex) {
+                            itrpicache->first -= 1;
+                        }
+                    }
+                    std::cout << "<<< swap cable at " << swapedcableindex << " and erase " << erasedcableindex << std::endl;
+                }
+                int hoge;
             }
         }
     }/*}}}*/
 
+    class EndPointInfo
+    {
+    public:
+        EndPointInfo() : cablesliceindex(-1) {
+            cablesliceindex = -1;
+        }
+        int cablesliceindex;
+        std::vector<int> pointindices;
+    };
+
     // note: viewer lock free
-    Cable findCableFromPoint(pcl::PointXYZ point, const std::vector<int>& scannedpointindicescache = std::vector<int>(), const std::vector<int>& ignoreindices = std::vector<int>()) { /*{{{*/
+    Cable findCableFromPoint(pcl::PointXYZ point, std::vector<Cable>& cables, std::vector<EndPointInfo>& endpointinfos, const std::vector<std::pair<int, int> >& scannedpointindicescache = std::vector<std::pair<int, int> >(), const std::vector<int>& ignoreindices = std::vector<int>()) { /*{{{*/
         pcl::PointIndices::Ptr k_indices;
         Cable cable;
         CableSlicePtr slice, oldslice, baseslice;
@@ -424,6 +593,8 @@ public:
         std::cout << "first slice found!" << std::endl;
         cable.push_back(slice);
 
+        endpointinfos.resize(2);
+        std::vector<int> scannedindices;
         // search forward
         for(size_t iteration=0;; iteration++) {
             int tryindex = tryfindingpointscounts_;
@@ -459,9 +630,12 @@ public:
 
             if (scannedpointindicescache.size() != 0)
             {
-                if(_isAlreadyScanned(k_indices, scannedpointindicescache, ignoreindices) != -1)
+                int scannedindex = _isAlreadyScanned(k_indices, scannedpointindicescache, scannedindices, ignoreindices);
+                if( scannedindex != -1)
                 {
                     PCL_INFO("[forward search] one of close points is already scanned, break.\n");
+                    endpointinfos[0].cablesliceindex = scannedindex;
+                    endpointinfos[0].pointindices.swap(scannedindices);
                     break;
                 }
             }
@@ -522,9 +696,12 @@ public:
 
             if (scannedpointindicescache.size() != 0)
             {
-                if(_isAlreadyScanned(k_indices, scannedpointindicescache, ignoreindices) != -1)
+                int scannedindex = _isAlreadyScanned(k_indices, scannedpointindicescache, scannedindices, ignoreindices);
+                if( scannedindex != -1)
                 {
                     PCL_INFO("[backward search] one of close points is already scanned, break.\n");
+                    endpointinfos[1].cablesliceindex = scannedindex;
+                    endpointinfos[1].pointindices.swap(scannedindices);
                     break;
                 }
             }
@@ -555,8 +732,9 @@ public:
     /*
      * return cable index if one of the points indicated by indices is already scanned in some cable
      */    
-    int _isAlreadyScanned(pcl::PointIndices::Ptr indices, const std::vector<int>& scannedpointindicescache, const std::vector<int>& ignoreindices = std::vector<int>())/*{{{*/
+    int _isAlreadyScanned(pcl::PointIndices::Ptr indices, const std::vector<std::pair<int, int> >& scannedpointindicescache, std::vector<int>& scannedindices, const std::vector<int>& ignoreindices = std::vector<int>())/*{{{*/
     {
+        /*{{{*/
         /*
         for (typename std::vector<Cable>::const_iterator itr = cables.begin(); itr != cables.end(); itr++) {
             for (typename std::list<CableSlicePtr>::const_iterator sliceitr = (*itr).begin(); sliceitr!= (*itr).end(); ++sliceitr) {
@@ -570,23 +748,33 @@ public:
             }
         }
         return false;
-        */
+        *//*}}}*/
         bool ignoreit = false;
+        std::map<int, int> histgram;
+        std::map<int, std::vector<int> > mapcableindextopointsindices;
         for (std::vector<int>::iterator i = indices->indices.begin(); i != indices->indices.end(); i++) {
-            if (scannedpointindicescache[*i] != -1) {
+            if (scannedpointindicescache[*i].first != -1) {
                 ignoreit = false;
                 for (std::vector<int>::const_iterator j = ignoreindices.begin(); j != ignoreindices.end(); j++) {
-                    if ((*j) == scannedpointindicescache[*i]) {
+                    if ((*j) == scannedpointindicescache[*i].first) {
                         ignoreit = true;
                         break;
                     }
                 }
                 if (!ignoreit) {
-                    return scannedpointindicescache[*i];
+                    //if(histgram.find(scannedpointindicescache[*i].first) == histgram.end()) { histgram[scannedpointindicescache[*i].first] = 0; }
+                    histgram[scannedpointindicescache[*i].first] += 1;
+                    mapcableindextopointsindices[scannedpointindicescache[*i].first].push_back(*i);
                 }
             }
         }
-        return -1;
+
+        if (histgram.size() == 0) {
+            return -1;
+        }
+        std::map<int, int>::iterator maxitr = std::max_element(histgram.begin(), histgram.end(), pairCompare2<int>);
+        scannedindices.swap(mapcableindextopointsindices[maxitr->first]);
+        return maxitr->first;
     }/*}}}*/
 
     // note: lock viewer_mutex_ beforehand
@@ -625,7 +813,6 @@ public:
             viewer_->addArrow(pt0, pt1, r, g, b, false, cylindername);
 
             /* uncomment this line if you want to visualize the points which are detected as cable */
-            /*
             pcl::PointCloud<pcl::PointXYZRGBNormal>::Ptr extractedpoints(new pcl::PointCloud<pcl::PointXYZRGBNormal>());
             pcl::copyPointCloud (*input_, *((*itr)->searchedindices), *extractedpoints);
 
@@ -640,7 +827,6 @@ public:
             pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZRGBNormal> rgbfield(extractedpoints, r*255, g*255, b*255);
             viewer_->addPointCloud<pcl::PointXYZRGBNormal> (extractedpoints, rgbfield, slicepointsid.str());
             viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, slicepointsid.str());
-            */
 
             //viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_COLOR, 0.0,0.0,1.0, "sample cloud_2");
             //viewer_->addPointCloud(extractedpoints, slicepointsid.str());
@@ -670,7 +856,6 @@ public:
         //CableSlicePtr lastslice  = cable.back();
         //
         pcl::ModelCoefficients::Ptr firstterminalcoeffs(new pcl::ModelCoefficients(*terminalcylindercoeffs_));
-        pcl::PointXYZ pt;
         Eigen::Vector3f dir; 
         dir(0) = (*cable.begin())->cylindercoeffs->values[3] + (*boost::next(cable.begin(),1))->cylindercoeffs->values[3] + (*boost::next(cable.begin(),2))->cylindercoeffs->values[3];
         dir(1) = (*cable.begin())->cylindercoeffs->values[4] + (*boost::next(cable.begin(),1))->cylindercoeffs->values[4] + (*boost::next(cable.begin(),2))->cylindercoeffs->values[4];
@@ -1161,11 +1346,12 @@ public:
 
     bool _estimateCylinderAroundPointsIndices (pcl::PointIndices::Ptr pointsindices, CableSlice& slice, pcl::PointXYZ centerpt = pcl::PointXYZ(), const Eigen::Vector3f& initialaxis = Eigen::Vector3f(), double eps_angle=0.0) /*{{{*/
     {
+        pcl::ScopeTime t("_estimateCylinderAroundPointsIndices");
         // Create the segmentation object
         pcl::SACSegmentationFromNormals<PointNT, PointNT> seg;
         pcl::PointIndices::Ptr cylinderinlierindices(new pcl::PointIndices());
         // Optional
-        seg.setOptimizeCoefficients (true);
+        seg.setOptimizeCoefficients (true); // TODO this may be unnecessary
         Eigen::Vector3f axis;
         axis = initialaxis;
         axis.normalize();
@@ -1175,7 +1361,7 @@ public:
         seg.setModelType (pcl::SACMODEL_CYLINDER);
         //seg.setMethodType (pcl::SAC_RANSAC);
         seg.setMethodType (pcl::SAC_RRANSAC);
-        seg.setMaxIterations(10000);
+        seg.setMaxIterations(5000);
         seg.setDistanceThreshold (distthreshold_cylindermodel_);
         seg.setInputCloud (input_);
         seg.setInputNormals (input_);
@@ -1200,14 +1386,16 @@ public:
         }
 
         std::copy(pointsindices->indices.begin(), pointsindices->indices.end(), std::back_inserter(slice.searchedindices->indices) );
-        std::cerr << "cylinder Model cylindercoeffs: "
+        std::stringstream ss;
+        ss << "    cylinder Model cylindercoeffs: "
                   << slice.cylindercoeffs->values[0] << " "
                   << slice.cylindercoeffs->values[1] << " "
                   << slice.cylindercoeffs->values[2] << " "
                   << slice.cylindercoeffs->values[3] << " "
                   << slice.cylindercoeffs->values[4] << " "
                   << slice.cylindercoeffs->values[5] << " "
-                  << slice.cylindercoeffs->values[6] << " " << std::endl;
+                  << slice.cylindercoeffs->values[6] << " ";
+        PCL_INFO(std::string(ss.str() + "\n").c_str());
         return _validateCableSlice(slice);
     } /*}}}*/
     bool _validateCableSlice (CableSlice& slice) /*{{{*/
@@ -1215,6 +1403,7 @@ public:
         PCL_INFO("[_validateCableSlice] radius: %f, given: %f\n", slice.cylindercoeffs->values[6], cableradius_);
         //if(cableradius_* 0.65 > slice.cylindercoeffs->values[6] || slice.cylindercoeffs->values[6] > cableradius_* 1.35 ) {
         if(cableradius_* 0.6 > slice.cylindercoeffs->values[6] || slice.cylindercoeffs->values[6] > cableradius_* 1.4 ) {
+        //if(cableradius_* 0.3 > slice.cylindercoeffs->values[6] || slice.cylindercoeffs->values[6] > cableradius_* 1.7 ) {
             return false;
         }
         return true;
