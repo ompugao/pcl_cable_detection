@@ -721,10 +721,11 @@ finally:
         terminalcoeffs->values[6] += 0.010;
         terminalcoeffs->values[7] += 0.020;
         terminalcoeffs->values[8] -= 0.010;
-        _estimateTerminalFromInitialCoeffs2(terminalcoeffs);
+        Eigen::Affine3f terminaltransform;
+        _estimateTerminalFromInitialCoeffs2(terminalcoeffs, terminaltransform);
     }
 
-    bool _estimateTerminalFromInitialCoeffs2(pcl::ModelCoefficients::Ptr terminalcoeffs, std::string terminalindex = "")
+    bool _estimateTerminalFromInitialCoeffs2(pcl::ModelCoefficients::Ptr terminalcoeffs, Eigen::Affine3f& detectedterminaltransform, std::string terminalindex = "")
     {
         double planethreshold               = 0.0005; //0.0007
         double extractinliers_distthreshold = 0.001;
@@ -1235,6 +1236,7 @@ estimatefromplane1:
         }
         std::cout << terminaltransform.matrix() << std::endl;
         viewer_->addCoordinateSystem(0.05, terminaltransform);
+        detectedterminaltransform = terminaltransform;
         return true;
     }
 
@@ -1773,10 +1775,11 @@ estimatefromplane1:
         firstterminalcoeffs->values[7] += 0.010;
         firstterminalcoeffs->values[8] -= 0.005;
 
-        _estimateTerminalFromInitialCoeffes(firstterminalcoeffs);
+        Eigen::Affine3f terminaltransform;
+        _estimateTerminalFromInitialCoeffs(firstterminalcoeffs, terminaltransform);
     }/*}}}*/
 
-    void _estimateTerminalFromInitialCoeffes(pcl::ModelCoefficients::Ptr terminalcoeffs, std::string terminalindex = "")/*{{{*/
+    bool _estimateTerminalFromInitialCoeffs(pcl::ModelCoefficients::Ptr terminalcoeffs, Eigen::Affine3f& terminaltransform, std::string terminalindex = "")/*{{{*/
     {
         pcl::PointIndices::Ptr terminalscenepointsindices(new pcl::PointIndices());
         /*
@@ -1788,6 +1791,7 @@ estimatefromplane1:
         viewer_->removeShape("cylinder");
         viewer_->addCylinder(*cylmodel);
         */
+        Eigen::Affine3f besttransform;
         size_t points = _findScenePointIndicesInsideCylinder(terminalcoeffs, terminalscenepointsindices);
         if (points < 30) {
             PCL_INFO("too few points at the  slice to detect terminal, points: %d\n", points);
@@ -1845,7 +1849,6 @@ estimatefromplane1:
             //pcl::copyPointCloud(*object, *object_xyz);
             typename pcl::KdTreeFLANN<PointNT>::Ptr kdtree (new pcl::KdTreeFLANN<PointNT>());
             pcl::ExtractIndices<PointNT> extractNT;
-            Eigen::Affine3f besttransform;
             int maxinliernum = 0;
             double maxscore = 0.0;
             int rotnum = 360/5;
@@ -2198,6 +2201,7 @@ estimatefromplane1:
 /*}}}*/
         }
 
+        terminaltransform = besttransform;
     }/*}}}*/
 
     /* 

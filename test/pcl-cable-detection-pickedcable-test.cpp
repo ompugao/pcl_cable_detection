@@ -13,6 +13,9 @@
 #include <opencv2/opencv.hpp>
 #include <picojson.h>
 #include <pcl/range_image/range_image_planar.h>
+#include <pcl/filters/filter_indices.h>
+
+#include <pcl/filters/statistical_outlier_removal.h>
 
 class ImageProcessingResult
 {
@@ -42,7 +45,7 @@ public:
     unsigned int Recv(std::vector<ImageProcessingResult>& results) {
         std::string rep;
         std::stringstream repss;
-        unsigned int size = this->Recv(rep);
+        this->Recv(rep);
         std::cerr << rep << std::endl;
         repss << rep;
         picojson::value v;
@@ -67,7 +70,6 @@ public:
             res.maxy = (int)(a[6].get<double>());
             results.push_back(res);
         }
-        return size;
     }
 
     unsigned int Recv(std::string& data)
@@ -227,6 +229,12 @@ int main (int argc, char** argv)
     pcl::PointCloud<pcl::PointNormal>::Ptr cloud(new pcl::PointCloud<pcl::PointNormal>);
     pcl::PointCloud<pcl::PointNormal>::Ptr cloud_filtered(new pcl::PointCloud<pcl::PointNormal>);
     pcl::io::loadPCDFile (input_file, *cloud);
+    //pcl::StatisticalOutlierRemoval<pcl::PointNormal> sor;
+    //sor.setInputCloud (cloud);
+    //sor.setMeanK (30);
+    //sor.setStddevMulThresh (1.0);
+    //sor.filter (*cloud);
+
     std::cout << "loading image file..." << std::endl;
     cv::Mat image;
     image = cv::imread(input_imagefile,0); //read as gray-scale image
@@ -299,8 +307,9 @@ int main (int argc, char** argv)
     typedef CableDetection<pcl::PointNormal> CableDetectionPointNormal;
     CableDetectionPointNormal cabledetection(terminalcloud, axis);
     cabledetection.SetUpViewer();
+    cabledetection.RunViewerBackGround();
 
-    pcl::console::setVerbosityLevel (pcl::console::L_DEBUG);
+    //pcl::console::setVerbosityLevel (pcl::console::L_DEBUG);
     cabledetection.setCableRadius(cableradius);
     cabledetection.setThresholdCylinderModel(distthreshold_cylindermodel);
     cabledetection.setSceneSamplingRadius(scenesamplingradius);
@@ -311,155 +320,51 @@ int main (int argc, char** argv)
     pcl::RangeImagePlanar rip;
     rip.createFromPointCloudWithFixedSize(*(cabledetection.input_), width, height, tsaiparam_pt.get<double>("cx"), tsaiparam_pt.get<double>("cy"),
             tsaiparam_pt.get<double>("f"), tsaiparam_pt.get<double>("f"), Eigen::Affine3f::Identity());
+    //std::vector<int> ripindicesmapping;
+    //pcl::removeNaNFromPointCloud(rip, ripindicesmapping);
+    //for (size_t i = 0; i < rip.points.size(); i++) {
+        //std::cout << rip.points[i]<< std::endl;
+    //}
     pcl::PointCloud<pcl::PointWithRange>::Ptr cloudcenters(new pcl::PointCloud<pcl::PointWithRange>);
+    size_t i = 0;
     for (std::vector<ImageProcessingResult>::iterator itrres = results.begin(); itrres != results.end(); ++itrres) {
-        pcl::PointWithRange ptrange = rip.getPoint((float)itrres->centroid[0], (float)itrres->centroid[1]);
-        std::cout << ptrange << std::endl;
-        ptrange.z += 0.0042;
+        float x = (float)itrres->centroid[0];
+        float y = (float)itrres->centroid[1];
+        pcl::PointWithRange ptrange;
+        //ptrange = rip.getPoint(x, y);
+        //std::cout << "[" << x << "," << y << "]: " << ptrange << std::endl;
+        //ptrange = rip.getPoint(x+1, y);
+        //std::cout << "[" << x+1 << "," << y << "]: " << ptrange << std::endl;
+        //ptrange = rip.getPoint(x, y+1);
+        //std::cout << "[" << x << "," << y+1 << "]: " << ptrange << std::endl;
+        //ptrange = rip.getPoint(x+1, y+1);
+        //std::cout << "[" << x+1 << "," << y+1 << "]: " << ptrange << std::endl;
+        ptrange = rip.getPoint(x, y);
+        ptrange.z += 0.0042; //0.0032, 0.0042, 0.0052
         cloudcenters->points.push_back(ptrange);
+        pcl::PointXYZ pt1, pt2;
+        pt1.x = 0;
+        pt1.y = 0;
+        pt1.z = 0;
+        pt2.z = 1 * 3;
+        pt2.x = (x - tsaiparam_pt.get<double>("cx"))/tsaiparam_pt.get<double>("f") * pt2.z;
+        pt2.y = (y - tsaiparam_pt.get<double>("cy"))/tsaiparam_pt.get<double>("f") * pt2.z;
+        std::stringstream ss;
+        ss << "line" << i ;
+        //cabledetection.viewer_->addLine(pt1, pt2, 1,0,0,ss.str());
+        i++;
     }
+    pcl::io::savePCDFileBinaryCompressed("rip.pcd" ,rip);
     cloudcenters->width = results.size();
     cloudcenters->height = results.size();
     cloudcenters->is_dense = false;
-
+    std::vector<int> indicesmapping;
+    pcl::removeNaNFromPointCloud<pcl::PointWithRange>(*cloudcenters, indicesmapping);
     typedef pcl::visualization::PointCloudColorHandlerCustom<pcl::PointWithRange> ColorHandlerTR;
     cabledetection.viewer_->addPointCloud(cloudcenters, ColorHandlerTR(cloudcenters, 255.0, 0.0, 0.0), "cloudcenters");
     cabledetection.viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 13, "cloudcenters");
+    cabledetection.setTerminalCenterCloud(cloudcenters);
     
-    std::vector<CableDetectionPointNormal::Cable> cables;
-    {
-        pcl::ScopeTime t("findCables");
-        pcl::console::setVerbosityLevel (pcl::console::L_INFO);
-        cabledetection.findCables(cables);
-        pcl::console::setVerbosityLevel (pcl::console::L_DEBUG);
-        size_t terminalindex = 0;
-        for (std::vector<CableDetectionPointNormal::Cable>::iterator cableitr = cables.begin(); cableitr != cables.end(); cableitr++){
-            //cabledetection.findCableTerminal(*cableitr, 0.018);
-            double offset = 0.018;
-            //pcl::ModelCoefficients::Ptr terminalcoeffs(new pcl::ModelCoefficients);
-            //terminalcoeffs->values.resize(9);
-            CableDetectionPointNormal::Cable& cable = *cableitr;
-            pcl::console::print_highlight("cable: %d\n", cableitr-cables.begin());
-            if (cable.size() < 3) {
-                pcl::console::print_highlight("no enough cable slices to find terminals. continue.\n");
-                continue;
-            }
-            // one side
-            pcl::ModelCoefficients::Ptr terminalcoeffs(new pcl::ModelCoefficients(*(cabledetection.terminalcylindercoeffs_)));
-            Eigen::Vector3f dir; 
-            dir(0) = (*cable.begin())->cylindercoeffs->values[3] + (*boost::next(cable.begin(),1))->cylindercoeffs->values[3] + (*boost::next(cable.begin(),2))->cylindercoeffs->values[3];
-            dir(1) = (*cable.begin())->cylindercoeffs->values[4] + (*boost::next(cable.begin(),1))->cylindercoeffs->values[4] + (*boost::next(cable.begin(),2))->cylindercoeffs->values[4];
-            dir(2) = (*cable.begin())->cylindercoeffs->values[5] + (*boost::next(cable.begin(),1))->cylindercoeffs->values[5] + (*boost::next(cable.begin(),2))->cylindercoeffs->values[5];
-            dir.normalize();
-            terminalcoeffs->values[0] = (*cable.begin())->cylindercoeffs->values[0] + dir(0) * (offset);
-            terminalcoeffs->values[1] = (*cable.begin())->cylindercoeffs->values[1] + dir(1) * (offset);
-            terminalcoeffs->values[2] = (*cable.begin())->cylindercoeffs->values[2] + dir(2) * (offset);
-            terminalcoeffs->values[3] = dir[0];
-            terminalcoeffs->values[4] = dir[1];
-            terminalcoeffs->values[5] = dir[2];
-            terminalcoeffs->values[6] += 0.005;
-            terminalcoeffs->values[7] += 0.040;
-            terminalcoeffs->values[8] -= 0.005;
-            pcl::PointIndices::Ptr indices(new pcl::PointIndices);
-            indices->indices.resize(0);
-            FindPointIndicesInsideCylinder<pcl::PointWithRange>(cloudcenters, terminalcoeffs, indices);
-            if (indices->indices.size() != 1) {
-                pcl::console::print_highlight("could not find good center point from image processing. continue (%d)\n", indices->indices.size());
-                // visualization for debugging
-                pcl::PointCloud<pcl::PointNormal>::Ptr terminalscenepoints(new pcl::PointCloud<pcl::PointNormal>); 
-                pcl::PointIndices::Ptr terminalscenepointsindices(new pcl::PointIndices);
-                size_t points = cabledetection._findScenePointIndicesInsideCylinder(terminalcoeffs, terminalscenepointsindices);
-                pcl::ExtractIndices<pcl::PointNormal> extract;
-                extract.setInputCloud (cabledetection.input_);
-                extract.setIndices (terminalscenepointsindices);
-                //extract.setNegative (true);
-                extract.filter (*terminalscenepoints);
-                pcl::visualization::PointCloudColorHandlerCustom<pcl::PointNormal> rgbfield(terminalscenepoints, 255, 0, 255);
-                cabledetection.viewer_->removePointCloud ("terminalpoints_rejected" + terminalindex);
-                cabledetection.viewer_->addPointCloud<pcl::PointNormal> (terminalscenepoints, rgbfield,  "terminalpoints_rejected" + terminalindex);
-                cabledetection.viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 5, "terminalpoints_rejected" + terminalindex);
-                //cabledetection.viewer_->addCylinder(*terminalcoeffs, "cylinder " + terminalindex);
-            } else {
-                terminalcoeffs->values[0] = cloudcenters->points[indices->indices[0]].x;
-                terminalcoeffs->values[1] = cloudcenters->points[indices->indices[0]].y;
-                terminalcoeffs->values[2] = cloudcenters->points[indices->indices[0]].z;
-                Eigen::Vector3f newdir;
-                newdir[0] = cloudcenters->points[indices->indices[0]].x - (*cable.begin())->cylindercoeffs->values[0];
-                newdir[1] = cloudcenters->points[indices->indices[0]].y - (*cable.begin())->cylindercoeffs->values[1];
-                newdir[2] = cloudcenters->points[indices->indices[0]].z - (*cable.begin())->cylindercoeffs->values[2];
-                newdir.normalize();
-                terminalcoeffs->values[3] = newdir[0]; 
-                terminalcoeffs->values[4] = newdir[1]; 
-                terminalcoeffs->values[5] = newdir[2]; 
-
-                Eigen::Affine3f terminaltransform;
-                cabledetection._estimateTerminalFromInitialCoeffs(terminalcoeffs, terminaltransform, boost::lexical_cast<std::string>(terminalindex));
-            }
-            terminalindex++;
-
-            // the other side
-            terminalcoeffs.reset(new pcl::ModelCoefficients(*(cabledetection.terminalcylindercoeffs_)));
-            dir(0) = (*boost::prior(cable.end()))->cylindercoeffs->values[3] + (*boost::prior(cable.end(),2))->cylindercoeffs->values[3] + (*boost::prior(cable.end(),3))->cylindercoeffs->values[3];
-            dir(1) = (*boost::prior(cable.end()))->cylindercoeffs->values[4] + (*boost::prior(cable.end(),2))->cylindercoeffs->values[4] + (*boost::prior(cable.end(),3))->cylindercoeffs->values[4];
-            dir(2) = (*boost::prior(cable.end()))->cylindercoeffs->values[5] + (*boost::prior(cable.end(),2))->cylindercoeffs->values[5] + (*boost::prior(cable.end(),3))->cylindercoeffs->values[5];
-            dir.normalize();
-            dir *= -1;
-            terminalcoeffs->values[0] = (*boost::prior(cable.end()))->cylindercoeffs->values[0] + dir(0) * (offset);
-            terminalcoeffs->values[1] = (*boost::prior(cable.end()))->cylindercoeffs->values[1] + dir(1) * (offset);
-            terminalcoeffs->values[2] = (*boost::prior(cable.end()))->cylindercoeffs->values[2] + dir(2) * (offset);
-            terminalcoeffs->values[3] = dir[0];
-            terminalcoeffs->values[4] = dir[1];
-            terminalcoeffs->values[5] = dir[2];
-            terminalcoeffs->values[6] += 0.005;
-            terminalcoeffs->values[7] += 0.040;
-            terminalcoeffs->values[8] -= 0.005;
-            indices->indices.resize(0);
-            FindPointIndicesInsideCylinder<pcl::PointWithRange>(cloudcenters, terminalcoeffs, indices);
-            if (indices->indices.size() != 1) {
-                pcl::console::print_highlight("could not find good center point from image processing. continue (%d)\n", indices->indices.size());
-                // visualization for debugging
-                pcl::PointCloud<pcl::PointNormal>::Ptr terminalscenepoints(new pcl::PointCloud<pcl::PointNormal>); 
-                pcl::PointIndices::Ptr terminalscenepointsindices(new pcl::PointIndices);
-                size_t points = cabledetection._findScenePointIndicesInsideCylinder(terminalcoeffs, terminalscenepointsindices);
-                pcl::ExtractIndices<pcl::PointNormal> extract;
-                extract.setInputCloud (cabledetection.input_);
-                extract.setIndices (terminalscenepointsindices);
-                //extract.setNegative (true);
-                extract.filter (*terminalscenepoints);
-                pcl::visualization::PointCloudColorHandlerCustom<pcl::PointNormal> rgbfield(terminalscenepoints, 255, 0, 255);
-                cabledetection.viewer_->removePointCloud ("terminalpoints_rejected" + terminalindex);
-                cabledetection.viewer_->addPointCloud<pcl::PointNormal> (terminalscenepoints, rgbfield,  "terminalpoints_rejected" + terminalindex);
-                cabledetection.viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 5, "terminalpoints_rejected" + terminalindex);
-                //cabledetection.viewer_->addCylinder(*terminalcoeffs, "cylinder " + terminalindex);
-            } else {
-                terminalcoeffs->values[0] = cloudcenters->points[indices->indices[0]].x;
-                terminalcoeffs->values[1] = cloudcenters->points[indices->indices[0]].y;
-                terminalcoeffs->values[2] = cloudcenters->points[indices->indices[0]].z;
-                Eigen::Vector3f newdir;
-                newdir[0] = cloudcenters->points[indices->indices[0]].x - (*boost::prior(cable.end()))->cylindercoeffs->values[0];
-                newdir[1] = cloudcenters->points[indices->indices[0]].y - (*boost::prior(cable.end()))->cylindercoeffs->values[1];
-                newdir[2] = cloudcenters->points[indices->indices[0]].z - (*boost::prior(cable.end()))->cylindercoeffs->values[2];
-                newdir.normalize();
-                terminalcoeffs->values[3] = newdir[0]; 
-                terminalcoeffs->values[4] = newdir[1]; 
-                terminalcoeffs->values[5] = newdir[2]; 
-
-                Eigen::Affine3f terminaltransform;
-                cabledetection._estimateTerminalFromInitialCoeffs(terminalcoeffs, terminaltransform, boost::lexical_cast<std::string>(terminalindex));
-            }
-            terminalindex++;
-        }
-    }
-    int i = 0;
-    for (typename std::vector<CableDetectionPointNormal::Cable>::iterator itr = cables.begin(); itr != cables.end(); itr++ , i++) {
-        std::stringstream ss;
-        ss << "cable" << i << "_";
-        cabledetection.visualizeCable(*itr, ss.str());
-    }
-    std::cout << "found " << cables.size() << " cables"<< std::endl;
-
-    cabledetection.RunViewerBackGround();
-
 /*
     pcl::console::setVerbosityLevel (pcl::console::L_DEBUG);
     pcl::ModelCoefficients::Ptr terminalcoeffs(new pcl::ModelCoefficients);
@@ -498,7 +403,8 @@ int main (int argc, char** argv)
     //terminalcoeffs->values[6] = (0.0152369);
     //terminalcoeffs->values[7] = (0.0173);
     //terminalcoeffs->values[8] = (-0.02535);
-    cabledetection._estimateTerminalFromInitialCoeffes(terminalcoeffs);
+    Eigen::Affine3f terminaltransform;
+    cabledetection._estimateTerminalFromInitialCoeffes(terminalcoeffs, terminaltransform);
 */
     while (true) {
         boost::this_thread::sleep(boost::posix_time::milliseconds(1000));
