@@ -2243,8 +2243,13 @@ estimatefromplane1:
         if (radius == 0) {
             radius = cableradius_*2;
         }
+
         pcl::PointIndices::Ptr k_indices(new pcl::PointIndices());
         std::vector<float> k_sqr_distances;
+
+        if (!(pcl_isfinite (pt.x) && pcl_isfinite (pt.y) && pcl_isfinite (pt.z))) {
+            return k_indices;
+        }
         //kdtree_->setInputCloud(points_);
         kdtree_->radiusSearch (pt, radius, k_indices->indices, k_sqr_distances);
         return k_indices;
