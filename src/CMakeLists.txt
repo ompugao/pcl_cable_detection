@@ -16,7 +16,7 @@ set_target_properties(libpcl-cable-detection PROPERTIES COMPILE_FLAGS "${EXTRA_C
   VERSION ${PCL_CABLE_DETECTION_VERSION}
   CLEAN_DIRECT_OUTPUT 1
   )
-target_link_libraries(libpcl-cable-detection ${PCL_LIBRARIES} ${EXTRA_LIBRARIES})
+target_link_libraries(libpcl-cable-detection ${PCL_LIBRARIES} ${OpenCV_LIBS} ${EXTRA_LIBRARIES})
 if( MSVC )
   install(TARGETS libpcl-cable-detection RUNTIME DESTINATION bin LIBRARY DESTINATION bin ARCHIVE DESTINATION lib${LIB_SUFFIX})
 else()

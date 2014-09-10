@@ -219,6 +219,15 @@ include_directories(${PCL_INCLUDE_DIRS})
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
+# opencv (for cv::minAreaRect)
+find_package(OpenCV)
+if( NOT ${OpenCV_FOUND})
+    message( FATAL_ERROR "could not find opencv!" )
+endif()
+include_directories(${OpenCV_INCLUDE_DIRS})
+link_directories(${OpenCV_LIB_DIR})
+add_definitions(-DUSING_OPENCV)
+
 # msgpack
 #find_package(MsgPack)
 #if(MSGPACK_FOUND)

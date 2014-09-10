@@ -2,11 +2,14 @@
 #define __PCL_CABLE_DETECTION__
 
 #include <boost/random.hpp>
+#include <boost/array.hpp>
 #include <pcl/ModelCoefficients.h>
 #include <pcl/common/centroid.h>
 #include <pcl/common/eigen.h>
 #include <pcl/common/io.h>
 #include <pcl/common/time.h>
+#include <pcl/common/pca.h>
+#include <pcl/common/intersections.h>
 #include <pcl/console/print.h>
 #include <pcl/features/fpfh_omp.h>
 #include <pcl/features/normal_3d.h>
@@ -14,6 +17,7 @@
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/voxel_grid_occlusion_estimation.h>
+#include <pcl/filters/project_inliers.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/kdtree/kdtree.h>
 #include <pcl/kdtree/kdtree_flann.h>
@@ -27,7 +31,9 @@
 #include <pcl/sample_consensus/model_types.h>
 #include <pcl/search/pcl_search.h>
 #include <pcl/segmentation/sac_segmentation.h>
+#include <pcl/surface/concave_hull.h>
 #include <pcl/visualization/cloud_viewer.h>
+#include <cv.hpp>
 #include <algorithm> //copy,fill
 #include <iterator> //back_inserter
 #include <cstdlib> //random
@@ -42,6 +48,43 @@ template<class T>
 bool pairCompare2(const std::pair<T, T> & x, const std::pair<T, T> & y) {
   return x.second < y.second; 
 }
+
+/// \brief Return the minimal quaternion that orients sourcedir to targetdir
+///
+/// \ingroup affine_math
+/// \param sourcedir direction of the original vector, 3 values
+/// \param targetdir new direction, 3 values
+/// copy from openrave, quatRotateDirection function
+Eigen::Affine3f AffineFromRotateDirection(Eigen::Vector3f& sourcedir, Eigen::Vector3f& targetdir)/*{{{*/
+{
+    Eigen::Affine3f affinetransform;
+
+    Eigen::Vector3f rottodirection = sourcedir.cross(targetdir);
+    float fsin = rottodirection.norm();
+    float fcos = rottodirection.dot(targetdir);
+    Eigen::Vector3f torient;
+    if( fsin > 0 ) {
+        //return quatFromAxisAngle(rottodirection*(1/fsin), MATH_ATAN2(fsin, fcos));
+        affinetransform = Eigen::AngleAxisf(atan2(fsin, fcos), rottodirection*(1/fsin));
+        return affinetransform;
+    }
+    if( fcos < 0 ) {
+        // hand is flipped 180, rotate around x axis
+        rottodirection[0] = 1;
+        rottodirection[1] = 0;
+        rottodirection[2] = 0;
+
+        rottodirection -= sourcedir * sourcedir.dot(rottodirection);
+        if( rottodirection.squaredNorm() < 1e-8 ) {
+            rottodirection[0] = 0; rottodirection[1] = 0; rottodirection[2] = 1;
+            rottodirection -= sourcedir * sourcedir.dot(rottodirection);
+        }
+        rottodirection.norm();
+        affinetransform = Eigen::AngleAxisf(atan2(fsin, fcos), rottodirection);
+        return affinetransform;
+    }
+    return Eigen::Affine3f::Identity();
+}/*}}}*/
 
 namespace pcl_cable_detection {
 
@@ -103,10 +146,167 @@ bool findPlane(const typename pcl::PointCloud<PointT>::Ptr cloud,
     return true;
 }
 
+template<typename PointT>
+size_t FindPointIndicesInsideCylinder(const typename pcl::PointCloud<PointT>::Ptr cloud, pcl::ModelCoefficients::Ptr terminalcylindercoeffs, pcl::PointIndices::Ptr indices)/*{{{*/
+{
+    Eigen::Vector3f w(terminalcylindercoeffs->values[3], terminalcylindercoeffs->values[4], terminalcylindercoeffs->values[5]);
+    w.normalize(); // just in case
+
+    double radius      = terminalcylindercoeffs->values[6];
+    double upperheight = terminalcylindercoeffs->values[7];
+    double lowerheight = terminalcylindercoeffs->values[8];
+    size_t count = 0;
+
+    for (size_t i = 0; i < cloud->points.size(); i++) {
+        Eigen::Vector3f v(cloud->points[i].x - terminalcylindercoeffs->values[0],
+                cloud->points[i].y - terminalcylindercoeffs->values[1],
+                cloud->points[i].z - terminalcylindercoeffs->values[2]);
+        Eigen::Vector3f projectedv = v.dot(w) * w;
+        double h = projectedv.norm();
+        if (h > upperheight || h < lowerheight) {
+            continue;
+        }
+        Eigen::Vector3f radiationv = v - projectedv;
+        double r2 = radiationv.norm();
+        if (r2 > radius) {
+            continue;
+        }
+        indices->indices.push_back(i);
+        count++;
+    }
+    return count;
+}/*}}}*/
+
+template<typename PointT>
+void computeTipPointByProjectIntoLine(const typename pcl::PointCloud<PointT>::Ptr cloud, const Eigen::Vector3f& line_dir, const Eigen::Vector3f& line_pt, float& maxtiplength, Eigen::Vector3f& maxtippoint, Eigen::Vector3f& maxtippointonline, float& mintiplength, Eigen::Vector3f& mintippoint, Eigen::Vector3f& mintippointonline)/*{{{*/
+{
+    maxtiplength = -std::numeric_limits<float>::max(); //std::numeric_limits<float>::lowest();
+    mintiplength = std::numeric_limits<float>::max(); //std::numeric_limits<float>::lowest();
+    //Eigen::Vector4f line_pt(line[0], line[1], line[2], 0);
+    //Eigen::Vector4f line_dir(line[3], line[4], line[5], 0);
+    for (size_t ilinepoint = 0; ilinepoint < cloud->points.size(); ilinepoint++) {
+        Eigen::Vector3f pt(cloud->points[ilinepoint].x, cloud->points[ilinepoint].y, cloud->points[ilinepoint].z);
+        // double k = (DOT_PROD_3D (points[i], p21) - dotA_B) / dotB_B;
+        float k = (pt.dot (line_dir) - line_pt.dot (line_dir)) / line_dir.dot (line_dir);
+        if (maxtiplength < k) {
+            maxtiplength = k;
+            //Eigen::Vector4f pp = line_pt + k * line_dir;
+            maxtippointonline = line_pt + k * line_dir;
+            maxtippoint = pt;
+            //tippoint = pp.head<3>();
+        }
+        if (mintiplength > k) {
+            mintiplength = k;
+            mintippointonline = line_pt + k * line_dir;
+            mintippoint = pt;
+        }
+        //std::cout << "k: " << k << " maxtiplength: " << maxtiplength<<" mintiplength: " << mintiplength<< std::endl;
+        //std::cout << "    maxtippoint: " << maxtippoint[0] << ", " << maxtippoint[1] << ", " << maxtippoint[2] << std::endl;
+        //std::cout << "    mintippoint: " << mintippoint[0] << ", " << mintippoint[1] << ", " << mintippoint[2] << std::endl;
+    }
+}/*}}}*/
+
+// http://www.pcl-users.org/concave-hulls-td3802830.html
+template<typename PointT>
+double computeMeshArea(pcl::PointCloud<PointT> &cloud, std::vector<pcl::Vertices> mesh)/*{{{*/
+{
+    double surface_area = 0;
+    float x[3];
+    float y[3];
+    float z[3];
+    float d[3];
+    double s;
+    for(int i = 0; i < mesh.size(); i++)
+    {
+        x[0] = cloud[mesh[i].vertices[1]].x - cloud[mesh[i].vertices[0]].x;
+        x[1] = cloud[mesh[i].vertices[2]].x - cloud[mesh[i].vertices[1]].x;
+        x[2] = cloud[mesh[i].vertices[0]].x - cloud[mesh[i].vertices[2]].x;
+        y[0] = cloud[mesh[i].vertices[1]].y - cloud[mesh[i].vertices[0]].y;
+        y[1] = cloud[mesh[i].vertices[2]].y - cloud[mesh[i].vertices[1]].y;
+        y[2] = cloud[mesh[i].vertices[0]].y - cloud[mesh[i].vertices[2]].y;
+        z[0] = cloud[mesh[i].vertices[1]].z - cloud[mesh[i].vertices[0]].z;
+        z[1] = cloud[mesh[i].vertices[2]].z - cloud[mesh[i].vertices[1]].z;
+        z[2] = cloud[mesh[i].vertices[0]].z - cloud[mesh[i].vertices[2]].z;
+        d[0] = sqrt(x[0]*x[0]+y[0]*y[0]+z[0]*z[0]);
+        d[1] = sqrt(x[1]*x[1]+y[1]*y[1]+z[1]*z[1]);
+        d[2] = sqrt(x[2]*x[2]+y[2]*y[2]+z[2]*z[2]);
+        s = (d[0]+d[1]+d[2])/2.;
+        //std::cout << sqrt(s*(s-d[0])*(s-d[1])*(s-d[2])) <<'\t';
+        surface_area += sqrt(s*(s-d[0])*(s-d[1])*(s-d[2]));
+    }
+    std::cout << surface_area << std::endl;
+}/*}}}*/
+
+template<typename Point>
+std::vector<Eigen::Vector3f> minAreaRect(pcl::ModelCoefficients::Ptr planecoefficients, const typename pcl::PointCloud<Point>::ConstPtr &projected_cloud, Eigen::Vector3f v = Eigen::Vector3f::Zero())/*{{{*/
+{
+    std::vector<Eigen::Vector3f> table_top_bbx;
+
+    // Project points onto the table plane
+    //pcl::ProjectInliers<Point> proj;
+    //proj.setModelType(pcl::SACMODEL_PLANE);
+    //pcl::PointCloud<Point> projected_cloud;
+    //proj.setInputCloud(cloud);
+    //proj.setModelCoefficients(table_coefficients_const_);
+    //proj.filter(projected_cloud);
+
+    // store the table top plane parameters
+    Eigen::Vector3f plane_normal;
+    plane_normal.x() = planecoefficients->values[0];
+    plane_normal.y() = planecoefficients->values[1];
+    plane_normal.z() = planecoefficients->values[2];
+    // compute an orthogonal normal to the plane normal
+    if (v == Eigen::Vector3f::Zero()) {
+        v = plane_normal.unitOrthogonal();
+    }
+    // take the cross product of the two normals to get
+    // a thirds normal, on the plane
+    Eigen::Vector3f u = plane_normal.cross(v);
+
+    // project the 3D point onto a 2D plane
+    std::vector<cv::Point2f> points;
+    // choose a point on the plane
+    Eigen::Vector3f p0(projected_cloud->points[0].x,
+            projected_cloud->points[0].y,
+            projected_cloud->points[0].z);
+    for(unsigned int ii=0; ii<projected_cloud->points.size(); ii++)
+    {
+        Eigen::Vector3f p3d(projected_cloud->points[ii].x,
+                projected_cloud->points[ii].y,
+                projected_cloud->points[ii].z);
+
+        // subtract all 3D points with a point in the plane
+        // this will move the origin of the 3D coordinate system
+        // onto the plane
+        p3d = p3d - p0;
+
+        cv::Point2f p2d;
+        p2d.x = p3d.dot(u);
+        p2d.y = p3d.dot(v);
+        points.push_back(p2d);
+    }
+
+    cv::Mat points_mat(points);
+    cv::RotatedRect rrect = cv::minAreaRect(points_mat);
+    cv::Point2f rrPts[4];
+    rrect.points(rrPts);
+
+    //store the table top bounding points in a vector
+    for(unsigned int ii=0; ii<4; ii++)
+    {
+        Eigen::Vector3f pbbx(rrPts[ii].x*u + rrPts[ii].y*v + p0);
+        table_top_bbx.push_back(pbbx);
+    }
+    Eigen::Vector3f center(rrect.center.x*u + rrect.center.y*v + p0);
+    table_top_bbx.push_back(center);
+
+    return table_top_bbx;
+}/*}}}*/
+
 /** \brief compute curvature histogram for each point using a given radius
  */
 template<typename PointT, int N>
-void computeCurvatureHistogram(const typename pcl::PointCloud<PointT>::Ptr cloud,
+void computeCurvatureHistogram(const typename pcl::PointCloud<PointT>::Ptr cloud,/*{{{*/
                                int pointindex,
                                double radius, //pcl::PointIndices::Ptr indices,
                                float min,
@@ -126,7 +326,7 @@ void computeCurvatureHistogram(const typename pcl::PointCloud<PointT>::Ptr cloud
     for (std::vector<int>::const_iterator itr = k_indices.begin(); itr != k_indices.end(); ++itr) {
         histogram[(cloud->points[*itr].curvature)/binwidth] += 1;
     }
-}
+}/*}}}*/
 
 template <typename PointNT>
 class CableDetection {
@@ -204,6 +404,7 @@ public:
         terminalcylindercoeffs_.reset(new pcl::ModelCoefficients());
         _computeBoundingCylinder(terminalcloud_, terminalaxis, terminalcylindercoeffs_);
         srand (time(NULL));
+        selected_point_index = 0;
     }
     // setter
     /*{{{*/
@@ -214,6 +415,7 @@ public:
             boost::mutex::scoped_lock lock(viewer_mutex_);
             viewer_->removePointCloud("inputcloud");
             viewer_->addPointCloud<PointNT> (input_, "inputcloud");
+            //viewer_->addPointCloudNormals<PointNT> (input_, 1, 0.001, "inputcloud");
             viewer_->removeAllShapes();
         }
         // create pointcloud<pointxyz>
@@ -245,6 +447,10 @@ public:
     void setSceneSamplingRadius(double scenesampling_radius) {
         scenesampling_radius_ = scenesampling_radius;
     }
+    void setTerminalCenterCloud(pcl::PointCloud<pcl::PointWithRange>::Ptr cloudcenters)
+    {
+        cloudcenters_ = cloudcenters;
+    }
 /*}}}*/
 
     void LockViewer() {
@@ -261,7 +467,7 @@ public:
             viewer_->setBackgroundColor (0.0, 0.0, 0.0);
             viewer_->addCoordinateSystem(0.5);
             //viewer_->registerAreaPickingCallback(boost::bind(&CableDetection::area_picking_callback, this,_1));
-            viewer_->registerPointPickingCallback(boost::bind(&CableDetection::point_picking_callback, this, _1));
+            viewer_->registerPointPickingCallback(boost::bind(&CableDetection::point_picking_callback2, this, _1));
             viewer_->registerKeyboardCallback(boost::bind(&CableDetection::keyboard_callback, this, _1));
         }
         /*
@@ -355,6 +561,683 @@ public:
         //findCableTerminal(cable, 0.027);
         findCableTerminal(cable, 0.018);
     } /*}}}*/
+    void point_picking_callback2 (const pcl::visualization::PointPickingEvent& event) /*{{{*/
+    {
+        //pcl::PointXYZ pt;
+        //event.getPoint (pt.x, pt.y, pt.z);
+        size_t idx = event.getPointIndex ();
+        std::cout << "picking point index: " << idx << std::endl;
+
+        selected_points[selected_point_index].x = input_->points[idx].x;
+        selected_points[selected_point_index].y = input_->points[idx].y;
+        selected_points[selected_point_index].z = input_->points[idx].z;
+        if (selected_point_index == selected_points.size() - 1)
+        {
+            pcl::console::setVerbosityLevel (pcl::console::L_DEBUG);
+            std::cout << selected_points[0] << std::endl;
+            std::cout << selected_points[1] << std::endl;
+            Eigen::Vector3f dir(selected_points[1].x - selected_points[0].x,
+                    selected_points[1].y - selected_points[0].y,
+                    selected_points[1].z - selected_points[0].z);
+            dir.normalize();
+            Cable cable;
+            trackCableSimple(selected_points[0], dir, cable);
+/*{{{*/
+            /*
+            pcl::console::print_highlight("extract neareset points...\n");
+            std::vector<int> k_indices;
+            std::vector<float> k_sqr_distances;
+            kdtree_->radiusSearch (selected_points[selected_point_index], 0.01, k_indices, k_sqr_distances);
+            pcl::PointIndices::Ptr indices(new pcl::PointIndices);
+            indices->indices.swap(k_indices);
+            pcl::ExtractIndices<PointNT> extract;
+            PointCloudInputPtr terminalscenepoints(new PointCloudInput());
+            extract.setInputCloud (input_);
+            extract.setIndices (indices);
+            //extract.setNegative (true);
+            extract.filter (*terminalscenepoints);
+            std::cout << "points size: " << terminalscenepoints->points.size() << ", indices size: " << indices->indices.size() << std::endl;
+            viewer_->removePointCloud("extracted points to fit plane");
+            viewer_->addPointCloud<PointNT> (terminalscenepoints, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (terminalscenepoints, 255, 128, 255),  "extracted points to fit plane");
+            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "extracted points to fit plane");
+
+            pcl::PointIndices::Ptr inlierindices(new pcl::PointIndices);
+            pcl::ModelCoefficients::Ptr planemodelcoeffs(new pcl::ModelCoefficients);
+            double planethreshold = 0.0003; //0.0007
+            pcl::console::print_highlight("fit plane...\n");
+            // Create the segmentation object
+            pcl::SACSegmentation<PointNT> seg;
+            // Optional
+            seg.setOptimizeCoefficients (true);
+            //seg.setAxis(...);
+            // Mandatory
+            seg.setModelType (pcl::SACMODEL_PLANE);
+            seg.setMethodType (pcl::SAC_RANSAC);
+            //seg.setMethodType (pcl::SAC_RRANSAC);
+            seg.setMaxIterations(50000);
+            seg.setDistanceThreshold (planethreshold);
+            seg.setInputCloud (terminalscenepoints);
+            seg.segment (*inlierindices, *planemodelcoeffs);
+
+            if (inlierindices->indices.size () == 0)
+            {
+                pcl::console::print_highlight("failed to fit plane...\n");
+                goto finally;
+            }
+            PointCloudInputPtr pointsonplane(new PointCloudInput());
+            extract.setInputCloud (terminalscenepoints);
+            extract.setIndices (inlierindices);
+            //extract.setNegative (true);
+            extract.filter (*pointsonplane);
+            viewer_->removePointCloud("pointsonplane");
+            viewer_->addPointCloud<PointNT> (pointsonplane, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (pointsonplane, 0, 255, 0),  "pointsonplane");
+            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "pointsonplane");
+
+            viewer_->removeShape("plane");
+            viewer_->addPlane(*planemodelcoeffs, selected_points[selected_point_index].x, selected_points[selected_point_index].y, selected_points[selected_point_index].z);
+            *//*}}}*/
+        }
+finally:
+        selected_point_index = (selected_point_index+1)%selected_points.size();
+    } /*}}}*/
+    boost::array<pcl::PointXYZ,2> selected_points;
+    size_t selected_point_index;
+
+    bool trackCableSimple(pcl::PointXYZ initialpt, Eigen::Vector3f dir, Cable& cable)
+    {
+        CableSlicePtr slice, oldslice, baseslice;
+        dir.normalize();
+        pcl::PointIndices::Ptr k_indices;
+        pcl::PointXYZ searchpoint;
+        searchpoint = initialpt;
+        while(true) {
+            slice.reset(new CableSlice());
+            k_indices = _findClosePointsIndices(searchpoint, cableradius_*2);
+            if (k_indices->indices.size() == 0) {
+                PCL_DEBUG("endpoint?\n");
+                break;
+            }
+            Eigen::Vector4d centroid;
+            pcl::compute3DCentroid (*input_, *k_indices, centroid);
+
+            slice->searchedindices->indices.swap(k_indices->indices);
+            slice->centerpt_ = searchpoint;
+            //slice->centerpt_.x = centroid[0];
+            //slice->centerpt_.y = centroid[1];
+            //slice->centerpt_.z = centroid[2];
+            slice->cylindercoeffs->values.resize(9);
+            slice->cylindercoeffs->values[0] = centroid[0];
+            slice->cylindercoeffs->values[1] = centroid[1];
+            slice->cylindercoeffs->values[2] = centroid[2]+cableradius_;
+            slice->cylindercoeffs->values[6] = cableradius_;
+            if (!oldslice) {
+                //Eigen::Vector3f slicedir(oldslice->cylindercoeffs->values[0] - slice->cylindercoeffs->values[0],
+                        //oldslice->cylindercoeffs->values[1] - slice->cylindercoeffs->values[1],
+                        //oldslice->cylindercoeffs->values[2] - slice->cylindercoeffs->values[2]);
+                //slicedir.normalize();
+                slice->cylindercoeffs->values[3] = dir[0];
+                slice->cylindercoeffs->values[4] = dir[1];
+                slice->cylindercoeffs->values[5] = dir[2];
+                searchpoint.x = centroid[0] + dir[0] * cableradius_*4;
+                searchpoint.y = centroid[1] + dir[1] * cableradius_*4;
+                searchpoint.z = centroid[2] + dir[2] * cableradius_*4;
+            } else {
+                Eigen::Vector3f slicedir(slice->cylindercoeffs->values[0] - oldslice->cylindercoeffs->values[0],
+                        slice->cylindercoeffs->values[1] - oldslice->cylindercoeffs->values[1],
+                        slice->cylindercoeffs->values[2] - oldslice->cylindercoeffs->values[2]);
+                slicedir.normalize();
+                slice->cylindercoeffs->values[3] = slicedir[0];
+                slice->cylindercoeffs->values[4] = slicedir[1];
+                slice->cylindercoeffs->values[5] = slicedir[2];
+                searchpoint.x = centroid[0] + slicedir[0] * cableradius_*4;
+                searchpoint.y = centroid[1] + slicedir[1] * cableradius_*4;
+                searchpoint.z = centroid[2] + slicedir[2] * cableradius_*4;
+            }
+            oldslice = slice;
+            cable.push_front(slice);
+            std::cout << "push_front slice" << std::endl;
+        }
+        
+        //Eigen::Affine3f transform = AffineFromRotateDirection(Eigen::Vector3f(0,0,1),
+                //Eigen::Vector3f(cable.begin()->cylindercoeffs->values[3],
+                    //cable.begin()->cylindercoeffs->values[4],
+                    //cable.begin()->cylindercoeffs->values[5]));
+
+        //pcl::PointXYZ pt;
+        //pt.x = cable.begin()->cylindercoeffs->values[3];
+        //pt.y = cable.begin()->cylindercoeffs->values[4];
+        //pt.z = cable.begin()->cylindercoeffs->values[5];
+        //k_indices = _findClosePointsIndices(pt, cableradius_*);
+
+        pcl::ModelCoefficients::Ptr terminalcoeffs(new pcl::ModelCoefficients);
+        std::copy(terminalcylindercoeffs_->values.begin(), terminalcylindercoeffs_->values.end(),
+                std::back_inserter(terminalcoeffs->values));
+        terminalcoeffs->values[0] = (*cable.begin())->cylindercoeffs->values[0];
+        terminalcoeffs->values[1] = (*cable.begin())->cylindercoeffs->values[1];
+        terminalcoeffs->values[2] = (*cable.begin())->cylindercoeffs->values[2];
+        terminalcoeffs->values[3] = (*cable.begin())->cylindercoeffs->values[3];
+        terminalcoeffs->values[4] = (*cable.begin())->cylindercoeffs->values[4];
+        terminalcoeffs->values[5] = (*cable.begin())->cylindercoeffs->values[5];
+        terminalcoeffs->values[6] += 0.010;
+        terminalcoeffs->values[7] += 0.020;
+        terminalcoeffs->values[8] -= 0.010;
+        _estimateTerminalFromInitialCoeffs2(terminalcoeffs);
+    }
+
+    bool _estimateTerminalFromInitialCoeffs2(pcl::ModelCoefficients::Ptr terminalcoeffs, std::string terminalindex = "")
+    {
+        double planethreshold               = 0.0005; //0.0007
+        double extractinliers_distthreshold = 0.001;
+        int    indicessize_protruding       = 140;//200
+        int    indicessize_notprotruding    = 30;//200
+        double z_offset = 0.0032;
+        double y_offset = 0.00535;
+        double x_offset = 0.006;
+        double flatheadoffset = 0.015; // 0.012
+        double areasize_threshold = 135 * 1e-6; // > 6.4 * flatheadoffset && < 11.6 * flatheadoffset
+
+        pcl::ExtractIndices<PointNT> extract;
+        pcl::SACSegmentation<PointNT> seg;
+        pcl::ConvexHull<PointNT> chull;
+        pcl::ConcaveHull<PointNT> concavehull;
+        pcl::ProjectInliers<PointNT> proj;
+
+        // extract terminal scene pointcloud
+        std::cout << "_findScenePointIndicesInsideCylinder terminal coeffs: " << *terminalcoeffs << std::endl;
+        viewer_->removeShape("cylinder"+terminalindex);
+        viewer_->addCylinder(*terminalcoeffs,"cylinder"+terminalindex);
+        pcl::PointIndices::Ptr terminalscenepointsindices(new pcl::PointIndices);
+        size_t points = _findScenePointIndicesInsideCylinder(terminalcoeffs, terminalscenepointsindices);
+        std::cout << points << " points for terminal" << std::endl;
+
+        PointCloudInputPtr terminalscenepoints(new PointCloudInput());
+        extract.setInputCloud (input_);
+        extract.setIndices (terminalscenepointsindices);
+        extract.setNegative (false);
+        extract.filter (*terminalscenepoints);
+/*{{{*/
+        viewer_->removePointCloud("terminalscenepoints" + terminalindex);
+        viewer_->addPointCloud<PointNT> (terminalscenepoints, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (terminalscenepoints, 255, 128, 255),  "terminalscenepoints" + terminalindex);
+        viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "terminalscenepoints" + terminalindex);
+/*}}}*/
+        pcl::PointIndices::Ptr inlierindices1(new pcl::PointIndices);
+        pcl::ModelCoefficients::Ptr planemodelcoeffs1(new pcl::ModelCoefficients);
+        seg.setOptimizeCoefficients (true);
+        seg.setModelType (pcl::SACMODEL_PLANE);
+        seg.setMethodType (pcl::SAC_RANSAC);
+        //seg.setMethodType (pcl::SAC_RRANSAC);
+        seg.setMaxIterations(50000);
+        seg.setDistanceThreshold (planethreshold);
+        seg.setInputCloud (terminalscenepoints);
+        seg.segment (*inlierindices1, *planemodelcoeffs1);
+
+        if (inlierindices1->indices.size () == 0)
+        {
+            pcl::console::print_highlight("failed to fit plane...\n");
+            return false;
+        }
+
+        if (planemodelcoeffs1->values[2] > 0) {  // if the normal faces to the z-axis of camera coordinates
+            planemodelcoeffs1->values[0] *= -1; planemodelcoeffs1->values[1] *= -1; planemodelcoeffs1->values[2] *= -1; planemodelcoeffs1->values[3] *= -1;
+        }
+        std::cout << "plane1 coeffs: " << *planemodelcoeffs1 << std::endl;
+        PointCloudInputPtr pointsonplane1(new PointCloudInput());
+        PointCloudInputPtr pointsnotonplane1(new PointCloudInput());
+        extract.setInputCloud (terminalscenepoints);
+        extract.setIndices (inlierindices1);
+        extract.setNegative (false);
+        extract.filter (*pointsonplane1);
+        extract.setNegative (true);
+        extract.filter (*pointsnotonplane1);
+
+        viewer_->removePointCloud("pointsonplane1_" + terminalindex);/*{{{*/
+        viewer_->addPointCloud<PointNT> (pointsonplane1, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (pointsonplane1, 0, 255, 0),  "pointsonplane1_" + terminalindex);
+        viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "pointsonplane1_" + terminalindex);
+
+        viewer_->removeShape("plane1"+terminalindex);
+        viewer_->addPlane(*planemodelcoeffs1, pointsonplane1->points[0].x,pointsonplane1->points[0].y,pointsonplane1->points[0].z, "plane1"+terminalindex);/*}}}*/
+
+        // Find the distance from point to plane.
+        // http://mathworld.wolfram.com/Point-PlaneDistance.html
+        pcl::PointIndices::Ptr inlierindices_enlarged1(new pcl::PointIndices);
+        pcl::PointIndices::Ptr inlierindices_upper1(new pcl::PointIndices);
+        pcl::PointIndices::Ptr inlierindices_lower1(new pcl::PointIndices);
+        double denominator = sqrt(pow(planemodelcoeffs1->values[0], 2) + pow(planemodelcoeffs1->values[1], 2) + pow(planemodelcoeffs1->values[2], 2));
+        for (size_t i = 0; i < terminalscenepoints->size(); i++) {
+            double dist = terminalscenepoints->points[i].x * planemodelcoeffs1->values[0] + terminalscenepoints->points[i].y * planemodelcoeffs1->values[1] +  terminalscenepoints->points[i].z * planemodelcoeffs1->values[2] + planemodelcoeffs1->values[3];
+            dist /= denominator;
+            if (-extractinliers_distthreshold < dist && dist < extractinliers_distthreshold) {
+                inlierindices_enlarged1->indices.push_back(i);
+            }
+            else if (extractinliers_distthreshold < dist ) {
+                inlierindices_upper1->indices.push_back(i);
+            }
+            else if (dist < - extractinliers_distthreshold) {
+                inlierindices_lower1->indices.push_back(i);
+            }
+        }
+        std::cout << "inlierindices_enlarged1: " << inlierindices_enlarged1->indices.size() << std::endl;
+        std::cout << "inlierindices_upper1: " << inlierindices_upper1->indices.size() << std::endl;
+        std::cout << "inlierindices_lower1: " << inlierindices_lower1->indices.size() << std::endl;
+
+        PointCloudInputPtr terminalscenepoints2(new PointCloudInput());
+        extract.setInputCloud (terminalscenepoints);
+        extract.setIndices (inlierindices_enlarged1);
+        extract.setNegative (true);
+        extract.filter (*terminalscenepoints2);
+
+        viewer_->removePointCloud("terminalscenepoints2_" + terminalindex);/*{{{*/
+        viewer_->addPointCloud<PointNT> (terminalscenepoints2, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (terminalscenepoints2, 128, 255, 255),  "terminalscenepoints2_" + terminalindex);
+        viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "terminalscenepoints2_" + terminalindex);
+/*}}}*/
+
+        pcl::PointIndices::Ptr inlierindices2(new pcl::PointIndices);
+        pcl::ModelCoefficients::Ptr planemodelcoeffs2(new pcl::ModelCoefficients);
+        pcl::console::print_highlight("fit plane 2...\n");
+        seg.setOptimizeCoefficients (true);
+        //seg.setAxis(...);
+        seg.setModelType (pcl::SACMODEL_PLANE);
+        seg.setMethodType (pcl::SAC_RANSAC);
+        //seg.setMethodType (pcl::SAC_RRANSAC);
+        seg.setMaxIterations(50000);
+        seg.setDistanceThreshold (planethreshold);
+        seg.setInputCloud (terminalscenepoints2);
+        seg.segment (*inlierindices2, *planemodelcoeffs2);
+
+        pcl::PointIndices::Ptr inlierindices_enlarged2(new pcl::PointIndices);
+        pcl::PointIndices::Ptr inlierindices_upper2(new pcl::PointIndices);
+        pcl::PointIndices::Ptr inlierindices_lower2(new pcl::PointIndices);
+        PointCloudInputPtr pointsonplane2(new PointCloudInput());
+        if (inlierindices2->indices.size () == 0) {
+            pcl::console::print_highlight("failed to fit plane2\n");
+        } else {
+            if (planemodelcoeffs2->values[2] > 0) {  // if the normal faces to the z-axis of camera coordinates
+                planemodelcoeffs2->values[0] *= -1; planemodelcoeffs2->values[1] *= -1; planemodelcoeffs2->values[2] *= -1; planemodelcoeffs2->values[3] *= -1;
+            }
+            std::cout << "plane2 coeffs: " << *planemodelcoeffs2 << std::endl;
+            double denominator = sqrt(pow(planemodelcoeffs2->values[0], 2) + pow(planemodelcoeffs2->values[1], 2) + pow(planemodelcoeffs2->values[2], 2));
+            for (size_t i = 0; i < terminalscenepoints2->size(); i++) {
+                double dist = terminalscenepoints2->points[i].x * planemodelcoeffs2->values[0] + terminalscenepoints2->points[i].y * planemodelcoeffs2->values[1] +  terminalscenepoints2->points[i].z * planemodelcoeffs2->values[2] + planemodelcoeffs2->values[3];
+                dist /= denominator;
+                if (-extractinliers_distthreshold < dist && dist < extractinliers_distthreshold) {
+                    inlierindices_enlarged2->indices.push_back(i);
+                }
+                else if (extractinliers_distthreshold < dist ) {
+                    inlierindices_upper2->indices.push_back(i);
+                }
+                else if (dist < - extractinliers_distthreshold) {
+                    inlierindices_lower2->indices.push_back(i);
+                }
+            }
+            std::cout << "inlierindices_enlarged2: " << inlierindices_enlarged2->indices.size() << std::endl;
+            std::cout << "inlierindices_upper2: " << inlierindices_upper2->indices.size() << std::endl;
+            std::cout << "inlierindices_lower2: " << inlierindices_lower2->indices.size() << std::endl;
+            extract.setInputCloud (terminalscenepoints2);
+            extract.setIndices (inlierindices2);
+            extract.setNegative (false);
+            extract.filter (*pointsonplane2);
+            viewer_->removePointCloud("pointsonplane2"+terminalindex);
+            viewer_->addPointCloud<PointNT> (pointsonplane2, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (pointsonplane2, 0, 0, 255),  "pointsonplane2"+terminalindex);
+            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "pointsonplane2"+terminalindex);
+
+            viewer_->removeShape("plane2"+terminalindex);
+            viewer_->addPlane(*planemodelcoeffs2, pointsonplane2->points[0].x,pointsonplane2->points[0].y,pointsonplane2->points[0].z, "plane2" + terminalindex);
+
+        }
+
+        ////// estimate terminal pose
+        Eigen::Affine3f terminaltransform = Eigen::Affine3f::Identity();
+        Eigen::Vector3f dir(terminalcoeffs->values[3], terminalcoeffs->values[4], terminalcoeffs->values[5]);
+        Eigen::Vector3f n1(planemodelcoeffs1->values[0], planemodelcoeffs1->values[1], planemodelcoeffs1->values[2]); //plane1.head<3>()
+        Eigen::Vector3f n2(planemodelcoeffs2->values[0], planemodelcoeffs2->values[1], planemodelcoeffs2->values[2]);
+        Eigen::Vector4f plane1(planemodelcoeffs1->values[0], planemodelcoeffs1->values[1], planemodelcoeffs1->values[2], planemodelcoeffs1->values[3]);
+        Eigen::Vector4f plane2(planemodelcoeffs2->values[0], planemodelcoeffs2->values[1], planemodelcoeffs2->values[2], planemodelcoeffs2->values[3]);
+
+        if (inlierindices2->indices.size () != 0 && n1.dot(n2) < 0.4 && dir.dot(n1) < 0.4 && dir.dot(n1) < 0.4) {
+            // if it can estimate both planes
+            Eigen::VectorXf line;
+            pcl::planeWithPlaneIntersection(plane1, plane2, line, 0.05); //line[0] ~ line[2]: point //line[3] ~ line[5]: direction
+            if (line.segment(3,3).dot(dir) < 0) {
+                line[3] *= -1; line[4] *= -1; line[5] *= -1;
+            }
+
+            //pcl::ModelCoefficients line_coeff;/*{{{*/
+            //line_coeff.values.resize(6);
+            //for (size_t imodel = 0; imodel < 6; imodel++) {
+                //line_coeff.values[imodel] = line[imodel];
+            //}
+            ////viewer_->addLine (line_coeff, "line"+terminalindex);/*}}}*/
+            float maxtiplength = -std::numeric_limits<float>::max(); //std::numeric_limits<float>::lowest();
+            Eigen::Vector3f tippoint;
+            Eigen::Vector4f line_pt(line[0], line[1], line[2], 0);
+            Eigen::Vector4f line_dir(line[3], line[4], line[5], 0);
+            for (size_t ilinepoint = 0; ilinepoint < pointsonplane1->points.size(); ilinepoint++) {
+                Eigen::Vector4f pt(pointsonplane1->points[ilinepoint].x, pointsonplane1->points[ilinepoint].y, pointsonplane1->points[ilinepoint].z, 0);
+                // double k = (DOT_PROD_3D (points[i], p21) - dotA_B) / dotB_B;
+                float k = (pt.dot (line_dir) - line_pt.dot (line_dir)) / line_dir.dot (line_dir);
+                if (maxtiplength < k) {
+                    maxtiplength = k;
+                    Eigen::Vector4f pp = line_pt + k * line_dir;
+                    tippoint = pp.head<3>();
+                }
+                //std::cout << "k: " << k << std::endl;
+                //std::cout << "matxtiplength: " << maxtiplength << std::endl;
+                //std::cout << "tippoint: " << tippoint[0] << ", " << tippoint[1] << ", " << tippoint[2] << std::endl;
+            }
+
+            PointCloudInputPtr pointsonplane1_processed(new PointCloudInput);
+            PointCloudInputPtr pointsonplane2_processed(new PointCloudInput);
+
+            Eigen::Affine3f rot = Eigen::Affine3f::Identity();
+            // TODO need to consider terminalcylindercoeffs_, maybe need to prepare another parameter to define the pose to cable
+            rot.matrix().block<3,1>(0,1) = -dir;
+
+            if (inlierindices_upper1->indices.size() < indicessize_protruding) {
+                if (inlierindices_upper2->indices.size() < indicessize_protruding) {
+                    // plane1でもplane2でもでっぱりなし
+                    // compute area size
+                    // TODO? should evaluate totalarea1 itself?
+                    /*{{{*/
+                    proj.setModelType (pcl::SACMODEL_PLANE);
+                    proj.setInputCloud (terminalscenepoints);
+                    proj.setIndices (inlierindices_enlarged1);
+                    proj.setModelCoefficients (planemodelcoeffs1);
+                    proj.filter (*pointsonplane1_processed);
+                    chull.setInputCloud (pointsonplane1_processed);
+                    chull.setDimension(2);
+                    chull.setComputeAreaVolume(true);
+                    chull.reconstruct (*pointsonplane1_processed);
+                    double totalarea1 = chull.getTotalArea();
+                    proj.setModelType (pcl::SACMODEL_PLANE);
+                    proj.setIndices (inlierindices_enlarged2);
+                    proj.setInputCloud (terminalscenepoints2);
+                    proj.setModelCoefficients (planemodelcoeffs2);
+                    proj.filter (*pointsonplane2_processed);
+                    chull.setInputCloud (pointsonplane2_processed);
+                    chull.setDimension(2);
+                    chull.setComputeAreaVolume(true);
+                    chull.reconstruct (*pointsonplane2_processed);
+                    double totalarea2 = chull.getTotalArea();/*}}}*/
+
+                    if (totalarea1 > totalarea2) {
+                        // plane1の方が大きい
+                        rot.matrix().block<3,1>(0,2) = -n1;
+                        rot.matrix().block<3,1>(0,0) = rot.matrix().block<3,1>(0,1).cross(rot.matrix().block<3,1>(0,2));//n2;
+                        terminaltransform = Eigen::Translation<float, 3>(tippoint[0], tippoint[1], tippoint[2]) * rot;
+                        if(n2.dot(rot.matrix().block<3,1>(0,0)) > 0) {
+                            pcl::console::print_highlight("terminal pose estimation pattern1-1\n");
+                            terminaltransform *= Eigen::Translation<float, 3>(-x_offset, y_offset, z_offset);
+                        } else {
+                            pcl::console::print_highlight("terminal pose estimation pattern1-2\n");
+                            terminaltransform *= Eigen::Translation<float, 3>(x_offset, y_offset, z_offset);
+                        }
+                    } else {
+                        // plane2の方が大きい
+                        rot.matrix().block<3,1>(0,2) = -n2;
+                        rot.matrix().block<3,1>(0,0) = rot.matrix().block<3,1>(0,1).cross(rot.matrix().block<3,1>(0,2));
+                        terminaltransform = Eigen::Translation<float, 3>(tippoint[0], tippoint[1], tippoint[2]) * rot;
+                        if(n1.dot(rot.matrix().block<3,1>(0,0)) > 0) {
+                            pcl::console::print_highlight("terminal pose estimation pattern2-1\n");
+                            terminaltransform *= Eigen::Translation<float, 3>(-x_offset, y_offset, z_offset);
+                        } else {
+                            pcl::console::print_highlight("terminal pose estimation pattern2-2\n");
+                            terminaltransform *= Eigen::Translation<float, 3>(x_offset, y_offset, z_offset);
+                        }
+                    }
+                } else {
+                    // plane2ででっぱりあり
+                    Eigen::Vector3f newn2 = dir.cross(n1);
+                    if(newn2.dot(n2) < 0) {
+                        newn2[0] *= -1; newn2[1] *= -1; newn2[2] *= -1;
+                    }
+                    rot.matrix().block<3,1>(0,2) = newn2;
+                    rot.matrix().block<3,1>(0,0) = rot.matrix().block<3,1>(0,1).cross(rot.matrix().block<3,1>(0,2));
+                    terminaltransform = Eigen::Translation<float, 3>(tippoint[0], tippoint[1], tippoint[2]) * rot;
+                    if(n1.dot(rot.matrix().block<3,1>(0,0)) > 0) {
+                        pcl::console::print_highlight("terminal pose estimation pattern3-1\n");
+                        terminaltransform *= Eigen::Translation<float, 3>(-x_offset, y_offset, -z_offset);
+                    } else {
+                        pcl::console::print_highlight("terminal pose estimation pattern3-2\n");
+                        terminaltransform *= Eigen::Translation<float, 3>(x_offset, y_offset, -z_offset);
+                    }
+                }
+            } else {
+                if (inlierindices_upper2->indices.size() < indicessize_protruding) {
+                    // plane1ででっぱりあり、plane2ででっぱりなし
+                    rot.matrix().block<3,1>(0,2) = n1;
+                    rot.matrix().block<3,1>(0,0) = rot.matrix().block<3,1>(0,1).cross(rot.matrix().block<3,1>(0,2));//n2;
+                    terminaltransform = Eigen::Translation<float, 3>(tippoint[0], tippoint[1], tippoint[2]) * rot;
+                    if(n2.dot(rot.matrix().block<3,1>(0,0)) > 0) {
+                        pcl::console::print_highlight("terminal pose estimation pattern4-1\n");
+                        terminaltransform *= Eigen::Translation<float, 3>(-x_offset, y_offset, -z_offset);
+                    } else {
+                        pcl::console::print_highlight("terminal pose estimation pattern4-2\n");
+                        terminaltransform *= Eigen::Translation<float, 3>(x_offset, y_offset, -z_offset);
+                    }
+                } else {
+                    // plane1ででもplane2ででっぱりあり おかしい
+                    pcl::console::print_highlight("both plane1 and plane2 are protruding? weird\n");
+                    pcl::console::print_highlight("ignore plane2");
+                    goto estimatefromplane1;
+                }
+            }
+        } else {
+estimatefromplane1:
+            viewer_->removeShape("plane2"+terminalindex);
+
+            PointCloudInputPtr pointsonplane1_projected(new PointCloudInput);
+            PointCloudInputPtr pointsonplane1_projected_onlyhead(new PointCloudInput);
+            PointCloudInputPtr pointsonplane1_chull(new PointCloudInput);
+            pcl::console::print_highlight("estimate from plane1\n");
+            //pcl::io::savePCDFileBinaryCompressed ("pointsonplane1.pcd", *pointsonplane1);
+            proj.setModelType (pcl::SACMODEL_PLANE);
+            proj.setIndices (inlierindices_enlarged1);
+            proj.setInputCloud (terminalscenepoints);
+            proj.setModelCoefficients (planemodelcoeffs1);
+            proj.filter (*pointsonplane1_projected);
+            //pcl::io::savePCDFileBinaryCompressed ("pointsonplane1_projected.pcd", *pointsonplane1_projected);
+
+            //chull.setInputCloud (pointsonplane1_projected);
+            //chull.setDimension(2);
+            //chull.setComputeAreaVolume(true);
+            //chull.reconstruct (*pointsonplane1_chull);
+            //double totalarea1 = chull.getTotalArea();
+
+            // guess tip point
+            Eigen::Vector3f origdir, origpt;
+            origdir = Eigen::Vector3f(terminalcoeffs->values[3], terminalcoeffs->values[4], terminalcoeffs->values[5]);
+            origpt = Eigen::Vector3f(terminalcoeffs->values[0], terminalcoeffs->values[1], terminalcoeffs->values[2]);
+            // use pca to get better dir,pt
+            pcl::PCA<PointNT> pca;
+            pca.setInputCloud(terminalscenepoints);
+            Eigen::Vector3f pcapt3;
+            Eigen::Vector4f pcapt4;
+            pcl::compute3DCentroid (*terminalscenepoints, pcapt4);
+            pcapt3 = pcapt4.segment<3>(0);
+            Eigen::Vector3f pcadir = pca.getEigenVectors().col(0);
+            if (pcadir.dot(origdir) < 0) {
+                origdir = -pcadir;
+            } else {
+                origdir = pcadir;
+            }
+            origpt = pcapt3;
+            origdir.normalize(); // just in case
+            float maxtiplength, mintiplength;
+            Eigen::Vector3f maxtippoint, maxtippointonline, mintippoint, mintippointonline;
+            //std::vector<int> removedpointindices;
+            //pcl::removeNaNFromPointCloud<PointNT>(*pointsonplane1_projected, removedpointindices);
+            computeTipPointByProjectIntoLine<PointNT>(pointsonplane1_projected, origdir, origpt, maxtiplength, maxtippoint, maxtippointonline, mintiplength, mintippoint, mintippointonline);
+            PointCloudInputPtr tmpcloud(new PointCloudInput);
+            tmpcloud->width = 4;
+            tmpcloud->height = 1;
+            tmpcloud->points.resize(4);
+            tmpcloud->points[0].x = maxtippoint[0]; tmpcloud->points[0].y = maxtippoint[1]; tmpcloud->points[0].z = maxtippoint[2];
+            tmpcloud->points[1].x = maxtippointonline[0]; tmpcloud->points[1].y = maxtippointonline[1]; tmpcloud->points[1].z = maxtippointonline[2];
+            tmpcloud->points[2].x = mintippoint[0]; tmpcloud->points[2].y = mintippoint[1]; tmpcloud->points[2].z = mintippoint[2];
+            tmpcloud->points[3].x = mintippointonline[0]; tmpcloud->points[3].y = mintippointonline[1]; tmpcloud->points[3].z = mintippointonline[2];
+            //viewer_->removePointCloud("tippoints"+terminalindex);
+            //viewer_->addPointCloud<PointNT>(tmpcloud, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (tmpcloud, 30, 200, 100),  "tippoints"+terminalindex);
+            //viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 30, "tippoints"+terminalindex);
+
+            Eigen::Vector3f origpt_shifted = origpt + (maxtiplength - terminalcoeffs->values[7]) * origdir;
+
+            // slide terminalcoeffs to get only head pointcloud
+            std::cout << "slide terminalcoeffs to get only head pointcloud" <<std::endl;
+            pcl::ModelCoefficients::Ptr terminalcoeffs_onlyhead(new pcl::ModelCoefficients);
+            std::copy(terminalcoeffs->values.begin(), terminalcoeffs->values.end(), std::back_inserter(terminalcoeffs_onlyhead->values));
+            terminalcoeffs_onlyhead->values[0] = origpt_shifted[0];
+            terminalcoeffs_onlyhead->values[1] = origpt_shifted[1];
+            terminalcoeffs_onlyhead->values[2] = origpt_shifted[2];
+            terminalcoeffs_onlyhead->values[8] = terminalcoeffs->values[7] - flatheadoffset;
+            std::cout << "terminalcoeffs_onlyhead: " <<std::endl;
+            std::cout << *terminalcoeffs_onlyhead << std::endl;
+
+            // extract head pointcloud
+            pcl::PointIndices::Ptr terminalheadindices(new pcl::PointIndices);
+            size_t numheadpoints = FindPointIndicesInsideCylinder<PointNT>(pointsonplane1_projected, terminalcoeffs_onlyhead, terminalheadindices);
+            if (numheadpoints == 0) {
+                PCL_ERROR("no points inside the head of the terminal!?\n");
+                return false;
+            }
+            extract.setInputCloud (pointsonplane1_projected);
+            extract.setIndices (terminalheadindices);
+            extract.setNegative (false);
+            extract.filter (*pointsonplane1_projected_onlyhead);
+
+            ///  compute rectangle vertices ///
+            // recompute origpt using only head pointcloud
+            origdir = Eigen::Vector3f(terminalcoeffs->values[3], terminalcoeffs->values[4], terminalcoeffs->values[5]);
+            origpt = Eigen::Vector3f(terminalcoeffs->values[0], terminalcoeffs->values[1], terminalcoeffs->values[2]);
+            origdir.normalize();
+            //float maxtiplength, mintiplength;
+            //Eigen::Vector3f maxtippoint, maxtippointonline, mintippoint, mintippointonline;
+            computeTipPointByProjectIntoLine<PointNT>(pointsonplane1_projected_onlyhead, origdir, origpt, maxtiplength, maxtippoint, maxtippointonline, mintiplength, mintippoint, mintippointonline);
+            origpt_shifted = origpt + (maxtiplength - terminalcoeffs->values[7]) * origdir;
+            
+            // compute new dir and new pt using minAreaRect
+            std::cout << "compute new dir and new pt using minAreaRect" << std::endl;
+            Eigen::Vector3f newdir, newpt;
+            std::vector<Eigen::Vector3f> rectvertices = minAreaRect<PointNT>(planemodelcoeffs1, pointsonplane1_projected_onlyhead);// the last one is the center
+            // (pickup 2 head vertices of the rectvertices)
+            //Eigen::Vector3f headpoint[2];
+            //headpoints[0] = rectvertices[0]; headpoints[1] = rectvertices[1];
+            //float maxlength[2];
+            //maxlength[0] = -std::numeric_limits<float>::max();  maxlength[1] = -std::numeric_limits<float>::max();
+            std::vector<std::pair<double, unsigned int> > pairlengthtopointindex;
+            for (size_t irectpoint = 0; irectpoint < 4; irectpoint++) {
+                Eigen::Vector3f& pt = rectvertices[irectpoint];
+                pairlengthtopointindex.push_back(std::pair<double, unsigned int>(((pt.dot (origdir) - origpt_shifted.dot (origdir)) / origdir.dot (origdir)), irectpoint));
+            }
+                //Eigen::Vector3f& pt = rectvertices[irectpoint];
+                //float k = (pt.dot (origdir) - origpt_shifted.dot (origdir)) / origdir.dot (origdir);
+                //std::cout << "k: " << k << " maxlength[0]: " << maxlength[0] << " maxlength[1]: " << maxlength[1] << std::endl;
+                //if (maxlength[0] < k) {
+                    //maxlength[0] = k;
+                    //headpoints[0] = pt;
+                //}
+                //if (maxlength[1] < k && k < maxlength[0]) {
+                    //maxlength[1] = k;
+                    //headpoints[1] = pt;
+                //}
+                //std::cout << " -> maxlength[0]: " << maxlength[0] << " maxlength[1]: " << maxlength[1] << std::endl;
+            //}
+            std::sort(pairlengthtopointindex.begin(), pairlengthtopointindex.end(), std::greater<std::pair<double, unsigned int> >());
+            Eigen::Vector3f& headpoints0 = rectvertices[pairlengthtopointindex[0].second];
+            Eigen::Vector3f& headpoints1 = rectvertices[pairlengthtopointindex[1].second];
+            newdir = (headpoints0 + headpoints1)/2.0 - rectvertices[4];
+            newdir.normalize();
+            newpt = (headpoints0 + headpoints1)/2.0 - y_offset * newdir;
+            std::cout << "newdir: " << newdir << std::endl;
+            std::cout << "newpt: " << newpt << std::endl;
+
+
+            // visualization
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rectcloud(new pcl::PointCloud<pcl::PointXYZ>);
+            rectcloud->width = 5;
+            rectcloud->height = 5;
+            rectcloud->points.resize(rectcloud->width*rectcloud->height);
+            for (size_t irv = 0; irv < rectvertices.size() ; irv++) {
+                pcl::PointXYZ& pt = rectcloud->points[irv];
+                pt.x = rectvertices[irv][0];
+                pt.y = rectvertices[irv][1];
+                pt.z = rectvertices[irv][2];
+            }
+            viewer_->removePointCloud("rectvertices"+terminalindex);
+            viewer_->addPointCloud<pcl::PointXYZ>(rectcloud, pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> (rectcloud, 100, 90, 30),  "rectvertices"+terminalindex);
+            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 25, "rectvertices"+terminalindex);
+            pcl::PointXYZ pt0, pt1;
+            pt0.x = newpt[0]; pt0.y = newpt[1]; pt0.z = newpt[2];
+            pt1.x = newpt[0] + newdir[0] * 0.01; pt1.y = newpt[1] + newdir[1] * 0.01; pt1.z = newpt[2] + newdir[2] * 0.01;
+
+            viewer_->removeShape("termianlcyl" + terminalindex);
+            viewer_->addLine(pt0, pt1, 1, 0, 0.5, "termianlcyl" + terminalindex);
+
+            // compute area using rectvertices
+            double headarea = (rectvertices[0] - rectvertices[1]).norm() * (rectvertices[1] - rectvertices[2]).norm();
+
+            Eigen::Affine3f rot = Eigen::Affine3f::Identity();
+            rot.matrix().block<3,1>(0,1) = -newdir;
+            if (headarea > areasize_threshold) {
+                if (inlierindices_upper1->indices.size() < indicessize_protruding) {
+                    // でっぱりが奥
+                    pcl::console::print_highlight("terminal pose estimation pattern5-1\n");
+                    rot.matrix().block<3,1>(0,2) = -Eigen::Vector3f(planemodelcoeffs1->values[0], planemodelcoeffs1->values[1], planemodelcoeffs1->values[2]);
+                    rot.matrix().block<3,1>(0,0) = rot.matrix().block<3,1>(0,1).cross(rot.matrix().block<3,1>(0,2));
+                    terminaltransform = Eigen::Translation<float, 3>(newpt[0], newpt[1], newpt[2]) * rot * Eigen::Translation<float, 3>(0, 0, z_offset);
+                } else {
+                    // でっぱりが手前
+                    pcl::console::print_highlight("terminal pose estimation pattern5-2\n");
+                    rot.matrix().block<3,1>(0,2) = Eigen::Vector3f(planemodelcoeffs1->values[0], planemodelcoeffs1->values[1], planemodelcoeffs1->values[2]);
+                    rot.matrix().block<3,1>(0,0) = rot.matrix().block<3,1>(0,1).cross(rot.matrix().block<3,1>(0,2));
+                    terminaltransform = Eigen::Translation<float, 3>(newpt[0], newpt[1], newpt[2]) * rot * Eigen::Translation<float, 3>(0, 0, -z_offset);
+                }
+            } else {
+                // distinguish which side is upper side
+                Eigen::Vector3f planenormal(planemodelcoeffs1->values[0], planemodelcoeffs1->values[1], planemodelcoeffs1->values[2]);
+                Eigen::Affine3f tmptransform = Eigen::Affine3f::Identity();
+                tmptransform.matrix().block<3,1>(0,0) = planenormal;
+                tmptransform.matrix().block<3,1>(0,1) = -newdir;
+                tmptransform.matrix().block<3,1>(0,2) = tmptransform.matrix().block<3,1>(0,0).cross(tmptransform.matrix().block<3,1>(0,1));
+                tmptransform.matrix().block<3,1>(0,3) = newpt;
+                std::cout << "tmptransform: " << std::endl;
+                std::cout << tmptransform.matrix() << std::endl;
+                PointCloudInputPtr pointsonplane1_origin(new PointCloudInput);
+                pcl::transformPointCloud(*pointsonplane1_projected, *pointsonplane1_origin, tmptransform.inverse());
+
+                viewer_->removePointCloud("pointsonplane1_origin"+terminalindex);
+                viewer_->addPointCloud(pointsonplane1_origin, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (pointsonplane1_origin, 30, 130, 80),  "pointsonplane1_origin"+terminalindex);
+                viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 20, "pointsonplane1_origin"+terminalindex);
+
+                // count num of points above/below x-y plane
+                size_t abovepoints = 0, belowpoints = 0;
+                for (size_t ipoint = 0; ipoint < pointsonplane1_origin->points.size(); ipoint++) {
+                    if (pointsonplane1_origin->points[ipoint].z > 0){
+                        abovepoints++;
+                    } else if (pointsonplane1_origin->points[ipoint].z < 0) {
+                        belowpoints++;
+                    }
+                }
+                std::cout << "above points: " << abovepoints << " below points: " << belowpoints << std::endl;
+                terminaltransform = tmptransform;
+                if (abovepoints > belowpoints) {
+                    // でっぱりが上
+                    pcl::console::print_highlight("terminal pose estimation pattern6-1\n");
+                    terminaltransform *= Eigen::Translation<float, 3>(-x_offset, 0, 0);
+                } else {
+                    // でっぱりが下
+                    pcl::console::print_highlight("terminal pose estimation pattern6-2\n");
+                    terminaltransform.matrix().block<3,1>(0,0) *= -1;
+                    terminaltransform.matrix().block<3,1>(0,2) *= -1;
+                    terminaltransform *= Eigen::Translation<float, 3>(x_offset, 0, 0);
+                }
+
+            }
+        }
+        std::cout << terminaltransform.matrix() << std::endl;
+        viewer_->addCoordinateSystem(0.05, terminaltransform);
+        return true;
+    }
+
 
     // lock viewer occasionally
     void findCables(std::vector<Cable>& cables)/*{{{*/
@@ -893,7 +1776,7 @@ public:
         _estimateTerminalFromInitialCoeffes(firstterminalcoeffs);
     }/*}}}*/
 
-    void _estimateTerminalFromInitialCoeffes(pcl::ModelCoefficients::Ptr terminalcoeffs, std::string terminalindex = "")
+    void _estimateTerminalFromInitialCoeffes(pcl::ModelCoefficients::Ptr terminalcoeffs, std::string terminalindex = "")/*{{{*/
     {
         pcl::PointIndices::Ptr terminalscenepointsindices(new pcl::PointIndices());
         /*
@@ -1315,7 +2198,7 @@ public:
 /*}}}*/
         }
 
-    }
+    }/*}}}*/
 
     /* 
      * param[in] terminalcylindercoeffs: terminalcylindercoeffs
@@ -1358,7 +2241,7 @@ public:
         }
         pcl::PointIndices::Ptr k_indices(new pcl::PointIndices());
         std::vector<float> k_sqr_distances;
-        kdtree_->setInputCloud(points_);
+        //kdtree_->setInputCloud(points_);
         kdtree_->radiusSearch (pt, radius, k_indices->indices, k_sqr_distances);
         return k_indices;
     } /*}}}*/
@@ -1374,7 +2257,8 @@ public:
         Eigen::Vector3f axis;
         axis = initialaxis;
         axis.normalize();
-        seg.setAxis (axis);
+        //TODO 'setRadiusLimits' instead of setAxis and setEpsAngle
+        seg.setAxis (axis); 
         seg.setEpsAngle(eps_angle);
         // Mandatory
         seg.setModelType (pcl::SACMODEL_CYLINDER);
@@ -1496,7 +2380,7 @@ public:
      * 0, 1, 2: pos
      * 3, 4, 5: dir
      * 6      : radius
-     * 7,8    : upperheight, lowerheight
+     * 7,8    : upperheight, lowerheight(negative value)
      */
     pcl::PointCloud<pcl::PointXYZ>::Ptr points_;
     pcl::PointIndices::Ptr indices_;
@@ -1513,6 +2397,7 @@ public:
     boost::mutex viewer_mutex_;
     boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer_;
 
+    pcl::PointCloud<pcl::PointWithRange>::Ptr cloudcenters_;
 };
 
 
