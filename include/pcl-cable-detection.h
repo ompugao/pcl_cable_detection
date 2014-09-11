@@ -581,7 +581,8 @@ public:
                     selected_points[1].z - selected_points[0].z);
             dir.normalize();
             Cable cable;
-            trackCableSimple(selected_points[0], dir, cable);
+            Eigen::Affine3f terminaltransform;
+            trackCableSimple(selected_points[0], dir, cable, terminaltransform);
 /*{{{*/
             /*
             pcl::console::print_highlight("extract neareset points...\n");
@@ -643,7 +644,7 @@ finally:
     boost::array<pcl::PointXYZ,2> selected_points;
     size_t selected_point_index;
 
-    bool trackCableSimple(pcl::PointXYZ initialpt, Eigen::Vector3f dir, Cable& cable)
+    bool trackCableSimple(pcl::PointXYZ initialpt, Eigen::Vector3f dir, Cable& cable, Eigen::Affine3f terminaltransform)
     {
         CableSlicePtr slice, oldslice, baseslice;
         dir.normalize();
@@ -709,6 +710,11 @@ finally:
         //pt.z = cable.begin()->cylindercoeffs->values[5];
         //k_indices = _findClosePointsIndices(pt, cableradius_*);
 
+        if (cable.size() == 0)
+        {
+            PCL_WARN("could not find any cable!\n");
+            return false;
+        }
         pcl::ModelCoefficients::Ptr terminalcoeffs(new pcl::ModelCoefficients);
         std::copy(terminalcylindercoeffs_->values.begin(), terminalcylindercoeffs_->values.end(),
                 std::back_inserter(terminalcoeffs->values));
@@ -721,8 +727,9 @@ finally:
         terminalcoeffs->values[6] += 0.010;
         terminalcoeffs->values[7] += 0.020;
         terminalcoeffs->values[8] -= 0.010;
-        Eigen::Affine3f terminaltransform;
-        _estimateTerminalFromInitialCoeffs2(terminalcoeffs, terminaltransform);
+        
+        bool status = _estimateTerminalFromInitialCoeffs2(terminalcoeffs, terminaltransform);
+        return status;
     }
 
     bool _estimateTerminalFromInitialCoeffs2(pcl::ModelCoefficients::Ptr terminalcoeffs, Eigen::Affine3f& detectedterminaltransform, std::string terminalindex = "")
