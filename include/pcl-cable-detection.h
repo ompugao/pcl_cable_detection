@@ -733,11 +733,11 @@ finally:
         terminalcoeffs->values[7] += 0.020;
         terminalcoeffs->values[8] -= 0.010;
         
-        bool status = _estimateTerminalFromInitialCoeffs2(terminalcoeffs, terminaltransform);
+        bool status = _estimateTerminalFromInitialCoeffs2(terminalcoeffs, terminaltransform, terminalindex, true);
         return status;
     }
 
-    bool _estimateTerminalFromInitialCoeffs2(pcl::ModelCoefficients::Ptr terminalcoeffs, Eigen::Affine3f& detectedterminaltransform, std::string terminalindex = "")
+    bool _estimateTerminalFromInitialCoeffs2(pcl::ModelCoefficients::Ptr terminalcoeffs, Eigen::Affine3f& detectedterminaltransform, std::string terminalindex = "", bool enablefancyvisualization=false)
     {
         double planethreshold               = 0.0005; //0.0007
         double extractinliers_distthreshold = 0.001;
