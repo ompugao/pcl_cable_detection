@@ -413,10 +413,16 @@ public:
         input_ = input;
         if (!!viewer_) {
             boost::mutex::scoped_lock lock(viewer_mutex_);
-            viewer_->removePointCloud("inputcloud");
+            //viewer_->removePointCloud("inputcloud");
+            viewer_->removeAllPointClouds();
+            viewer_->removeAllShapes();
+            bool coordinatesystemremoved = true;
+            while(coordinatesystemremoved) {
+                coordinatesystemremoved = viewer_->removeCoordinateSystem();
+            }
+            viewer_->addCoordinateSystem(0.5);
             viewer_->addPointCloud<PointNT> (input_, "inputcloud");
             //viewer_->addPointCloudNormals<PointNT> (input_, 1, 0.001, "inputcloud");
-            viewer_->removeAllShapes();
         }
         // create pointcloud<pointxyz>
         points_.reset(new pcl::PointCloud<pcl::PointXYZ>());
@@ -465,7 +471,6 @@ public:
             boost::mutex::scoped_lock lock(viewer_mutex_);
             viewer_.reset(new pcl::visualization::PCLVisualizer("PCL cable detection viewer"));
             viewer_->setBackgroundColor (0.0, 0.0, 0.0);
-            viewer_->addCoordinateSystem(0.5);
             //viewer_->registerAreaPickingCallback(boost::bind(&CableDetection::area_picking_callback, this,_1));
             viewer_->registerPointPickingCallback(boost::bind(&CableDetection::point_picking_callback2, this, _1));
             viewer_->registerKeyboardCallback(boost::bind(&CableDetection::keyboard_callback, this, _1));
@@ -644,7 +649,7 @@ finally:
     boost::array<pcl::PointXYZ,2> selected_points;
     size_t selected_point_index;
 
-    bool trackCableSimple(pcl::PointXYZ initialpt, Eigen::Vector3f dir, Cable& cable, Eigen::Affine3f terminaltransform)
+    bool trackCableSimple(pcl::PointXYZ initialpt, Eigen::Vector3f dir, Cable& cable, Eigen::Affine3f& terminaltransform, std::string terminalindex="")
     {
         CableSlicePtr slice, oldslice, baseslice;
         dir.normalize();
@@ -752,8 +757,8 @@ finally:
 
         // extract terminal scene pointcloud
         std::cout << "_findScenePointIndicesInsideCylinder terminal coeffs: " << *terminalcoeffs << std::endl;
-        viewer_->removeShape("cylinder"+terminalindex);
-        viewer_->addCylinder(*terminalcoeffs,"cylinder"+terminalindex);
+        //viewer_->removeShape("cylinder"+terminalindex);
+        //viewer_->addCylinder(*terminalcoeffs,"cylinder"+terminalindex);
         pcl::PointIndices::Ptr terminalscenepointsindices(new pcl::PointIndices);
         size_t points = _findScenePointIndicesInsideCylinder(terminalcoeffs, terminalscenepointsindices);
         std::cout << points << " points for terminal" << std::endl;
@@ -764,9 +769,11 @@ finally:
         extract.setNegative (false);
         extract.filter (*terminalscenepoints);
 /*{{{*/
-        viewer_->removePointCloud("terminalscenepoints" + terminalindex);
-        viewer_->addPointCloud<PointNT> (terminalscenepoints, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (terminalscenepoints, 255, 128, 255),  "terminalscenepoints" + terminalindex);
-        viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "terminalscenepoints" + terminalindex);
+        if (enablefancyvisualization) {
+            viewer_->removePointCloud("terminalscenepoints" + terminalindex);
+            viewer_->addPointCloud<PointNT> (terminalscenepoints, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (terminalscenepoints, 255, 128, 255),  "terminalscenepoints" + terminalindex);
+            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "terminalscenepoints" + terminalindex);
+        }
 /*}}}*/
         pcl::PointIndices::Ptr inlierindices1(new pcl::PointIndices);
         pcl::ModelCoefficients::Ptr planemodelcoeffs1(new pcl::ModelCoefficients);
@@ -798,12 +805,15 @@ finally:
         extract.setNegative (true);
         extract.filter (*pointsnotonplane1);
 
-        viewer_->removePointCloud("pointsonplane1_" + terminalindex);/*{{{*/
-        viewer_->addPointCloud<PointNT> (pointsonplane1, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (pointsonplane1, 0, 255, 0),  "pointsonplane1_" + terminalindex);
-        viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "pointsonplane1_" + terminalindex);
+        if (enablefancyvisualization) {/*{{{*/
+            viewer_->removePointCloud("pointsonplane1_" + terminalindex);
+            viewer_->addPointCloud<PointNT> (pointsonplane1, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (pointsonplane1, 0, 255, 0),  "pointsonplane1_" + terminalindex);
+            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "pointsonplane1_" + terminalindex);
 
-        viewer_->removeShape("plane1"+terminalindex);
-        viewer_->addPlane(*planemodelcoeffs1, pointsonplane1->points[0].x,pointsonplane1->points[0].y,pointsonplane1->points[0].z, "plane1"+terminalindex);/*}}}*/
+            viewer_->removeShape("plane1"+terminalindex);
+            viewer_->addPlane(*planemodelcoeffs1, pointsonplane1->points[0].x,pointsonplane1->points[0].y,pointsonplane1->points[0].z, "plane1"+terminalindex);
+        }
+        /*}}}*/
 
         // Find the distance from point to plane.
         // http://mathworld.wolfram.com/Point-PlaneDistance.html
@@ -834,10 +844,12 @@ finally:
         extract.setNegative (true);
         extract.filter (*terminalscenepoints2);
 
-        viewer_->removePointCloud("terminalscenepoints2_" + terminalindex);/*{{{*/
-        viewer_->addPointCloud<PointNT> (terminalscenepoints2, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (terminalscenepoints2, 128, 255, 255),  "terminalscenepoints2_" + terminalindex);
-        viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "terminalscenepoints2_" + terminalindex);
-/*}}}*/
+        if (enablefancyvisualization) {/*{{{*/
+            viewer_->removePointCloud("terminalscenepoints2_" + terminalindex);
+            viewer_->addPointCloud<PointNT> (terminalscenepoints2, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (terminalscenepoints2, 128, 255, 255),  "terminalscenepoints2_" + terminalindex);
+            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "terminalscenepoints2_" + terminalindex);
+        }
+        /*}}}*/
 
         pcl::PointIndices::Ptr inlierindices2(new pcl::PointIndices);
         pcl::ModelCoefficients::Ptr planemodelcoeffs2(new pcl::ModelCoefficients);
@@ -884,12 +896,14 @@ finally:
             extract.setIndices (inlierindices2);
             extract.setNegative (false);
             extract.filter (*pointsonplane2);
-            viewer_->removePointCloud("pointsonplane2"+terminalindex);
-            viewer_->addPointCloud<PointNT> (pointsonplane2, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (pointsonplane2, 0, 0, 255),  "pointsonplane2"+terminalindex);
-            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "pointsonplane2"+terminalindex);
+            if (enablefancyvisualization) {
+                viewer_->removePointCloud("pointsonplane2"+terminalindex);
+                viewer_->addPointCloud<PointNT> (pointsonplane2, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (pointsonplane2, 0, 0, 255),  "pointsonplane2"+terminalindex);
+                viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 10, "pointsonplane2"+terminalindex);
 
-            viewer_->removeShape("plane2"+terminalindex);
-            viewer_->addPlane(*planemodelcoeffs2, pointsonplane2->points[0].x,pointsonplane2->points[0].y,pointsonplane2->points[0].z, "plane2" + terminalindex);
+                viewer_->removeShape("plane2"+terminalindex);
+                viewer_->addPlane(*planemodelcoeffs2, pointsonplane2->points[0].x,pointsonplane2->points[0].y,pointsonplane2->points[0].z, "plane2" + terminalindex);
+            }
 
         }
 
@@ -1170,15 +1184,18 @@ estimatefromplane1:
                 pt.y = rectvertices[irv][1];
                 pt.z = rectvertices[irv][2];
             }
-            viewer_->removePointCloud("rectvertices"+terminalindex);
-            viewer_->addPointCloud<pcl::PointXYZ>(rectcloud, pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> (rectcloud, 100, 90, 30),  "rectvertices"+terminalindex);
-            viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 25, "rectvertices"+terminalindex);
             pcl::PointXYZ pt0, pt1;
             pt0.x = newpt[0]; pt0.y = newpt[1]; pt0.z = newpt[2];
             pt1.x = newpt[0] + newdir[0] * 0.01; pt1.y = newpt[1] + newdir[1] * 0.01; pt1.z = newpt[2] + newdir[2] * 0.01;
 
-            viewer_->removeShape("termianlcyl" + terminalindex);
-            viewer_->addLine(pt0, pt1, 1, 0, 0.5, "termianlcyl" + terminalindex);
+            if (enablefancyvisualization) {
+                viewer_->removePointCloud("rectvertices"+terminalindex);
+                viewer_->addPointCloud<pcl::PointXYZ>(rectcloud, pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> (rectcloud, 100, 90, 30),  "rectvertices"+terminalindex);
+                viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 25, "rectvertices"+terminalindex);
+                viewer_->removeShape("termianlcyl" + terminalindex);
+                viewer_->addLine(pt0, pt1, 1, 0, 0.5, "termianlcyl" + terminalindex);
+            }
+            // end of visualization
 
             // compute area using rectvertices
             double headarea = (rectvertices[0] - rectvertices[1]).norm() * (rectvertices[1] - rectvertices[2]).norm();
