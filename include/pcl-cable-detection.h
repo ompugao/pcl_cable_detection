@@ -745,9 +745,10 @@ finally:
         int    indicessize_notprotruding    = 30;//200
         double z_offset = 0.0032;
         double y_offset = 0.00535;
-        double x_offset = 0.006;
-        double flatheadoffset = 0.015; // 0.012
+        double x_offset = 0.0058;
+        double flatheadoffset = 0.012; // 0.012 // 先端から平面が続く長さ
         double areasize_threshold = 135 * 1e-6; // > 6.4 * flatheadoffset && < 11.6 * flatheadoffset
+        double radiusoutlierremovalsize = 0.0003;
 
         pcl::ExtractIndices<PointNT> extract;
         pcl::SACSegmentation<PointNT> seg;
@@ -781,7 +782,7 @@ finally:
         seg.setModelType (pcl::SACMODEL_PLANE);
         seg.setMethodType (pcl::SAC_RANSAC);
         //seg.setMethodType (pcl::SAC_RRANSAC);
-        seg.setMaxIterations(50000);
+        seg.setMaxIterations(1000);
         seg.setDistanceThreshold (planethreshold);
         seg.setInputCloud (terminalscenepoints);
         seg.segment (*inlierindices1, *planemodelcoeffs1);
@@ -791,8 +792,11 @@ finally:
             pcl::console::print_highlight("failed to fit plane...\n");
             return false;
         }
+        Eigen::Vector4f lookatvector4, centroidpt4;
+        pcl::compute3DCentroid (*terminalscenepoints, centroidpt4);
+        lookatvector4 = centroidpt4.normalized();
 
-        if (planemodelcoeffs1->values[2] > 0) {  // if the normal faces to the z-axis of camera coordinates
+        if (Eigen::Vector3f(planemodelcoeffs1->values[0], planemodelcoeffs1->values[1], planemodelcoeffs1->values[2]).dot(lookatvector4.segment<3>(0)) > 0) {  // if the normal faces to the z-axis of camera coordinates
             planemodelcoeffs1->values[0] *= -1; planemodelcoeffs1->values[1] *= -1; planemodelcoeffs1->values[2] *= -1; planemodelcoeffs1->values[3] *= -1;
         }
         std::cout << "plane1 coeffs: " << *planemodelcoeffs1 << std::endl;
@@ -853,13 +857,14 @@ finally:
 
         pcl::PointIndices::Ptr inlierindices2(new pcl::PointIndices);
         pcl::ModelCoefficients::Ptr planemodelcoeffs2(new pcl::ModelCoefficients);
+        planemodelcoeffs2->values.resize(4);
         pcl::console::print_highlight("fit plane 2...\n");
         seg.setOptimizeCoefficients (true);
         //seg.setAxis(...);
         seg.setModelType (pcl::SACMODEL_PLANE);
         seg.setMethodType (pcl::SAC_RANSAC);
         //seg.setMethodType (pcl::SAC_RRANSAC);
-        seg.setMaxIterations(50000);
+        seg.setMaxIterations(1000);
         seg.setDistanceThreshold (planethreshold);
         seg.setInputCloud (terminalscenepoints2);
         seg.segment (*inlierindices2, *planemodelcoeffs2);
@@ -871,7 +876,7 @@ finally:
         if (inlierindices2->indices.size () == 0) {
             pcl::console::print_highlight("failed to fit plane2\n");
         } else {
-            if (planemodelcoeffs2->values[2] > 0) {  // if the normal faces to the z-axis of camera coordinates
+            if (Eigen::Vector3f(planemodelcoeffs2->values[0], planemodelcoeffs2->values[1], planemodelcoeffs2->values[2]).dot(lookatvector4.segment<3>(0)) > 0) {  // if the normal faces to the z-axis of camera coordinates
                 planemodelcoeffs2->values[0] *= -1; planemodelcoeffs2->values[1] *= -1; planemodelcoeffs2->values[2] *= -1; planemodelcoeffs2->values[3] *= -1;
             }
             std::cout << "plane2 coeffs: " << *planemodelcoeffs2 << std::endl;
@@ -915,7 +920,9 @@ finally:
         Eigen::Vector4f plane1(planemodelcoeffs1->values[0], planemodelcoeffs1->values[1], planemodelcoeffs1->values[2], planemodelcoeffs1->values[3]);
         Eigen::Vector4f plane2(planemodelcoeffs2->values[0], planemodelcoeffs2->values[1], planemodelcoeffs2->values[2], planemodelcoeffs2->values[3]);
 
-        if (inlierindices2->indices.size () != 0 && n1.dot(n2) < 0.4 && dir.dot(n1) < 0.4 && dir.dot(n1) < 0.4) {
+        if ((inlierindices2->indices.size () != 0 && n1.dot(n2) < 0.4 && dir.dot(n1) < 0.4 && dir.dot(n1) < 0.4)
+                && plane2.dot(centroidpt4) > 0 // < 0 なら裏が見えてる
+                ) {
             // if it can estimate both planes
             Eigen::VectorXf line;
             pcl::planeWithPlaneIntersection(plane1, plane2, line, 0.05); //line[0] ~ line[2]: point //line[3] ~ line[5]: direction
@@ -980,7 +987,7 @@ finally:
                     chull.setComputeAreaVolume(true);
                     chull.reconstruct (*pointsonplane2_processed);
                     double totalarea2 = chull.getTotalArea();/*}}}*/
-
+                    std::cout << "totalarea1: " << totalarea1 << " totalarea2: " << totalarea2 << std::endl;
                     if (totalarea1 > totalarea2) {
                         // plane1の方が大きい
                         rot.matrix().block<3,1>(0,2) = -n1;
@@ -1053,7 +1060,8 @@ estimatefromplane1:
             pcl::console::print_highlight("estimate from plane1\n");
             //pcl::io::savePCDFileBinaryCompressed ("pointsonplane1.pcd", *pointsonplane1);
             proj.setModelType (pcl::SACMODEL_PLANE);
-            proj.setIndices (inlierindices_enlarged1);
+            //proj.setIndices (inlierindices_enlarged1);
+            proj.setIndices (inlierindices1);
             proj.setInputCloud (terminalscenepoints);
             proj.setModelCoefficients (planemodelcoeffs1);
             proj.filter (*pointsonplane1_projected);
@@ -1125,6 +1133,10 @@ estimatefromplane1:
             extract.setIndices (terminalheadindices);
             extract.setNegative (false);
             extract.filter (*pointsonplane1_projected_onlyhead);
+            //pcl::RadiusOutlierRemoval<PointNT> rorfilter;
+            //rorfilter.setRadiusSearch(radiusoutlierremovalsize);
+            //rorfilter.setInputCloud(pointsonplane1_projected_onlyhead);
+            //rorfilter.filter(*pointsonplane1_projected_onlyhead);
 
             ///  compute rectangle vertices ///
             // recompute origpt using only head pointcloud
@@ -1141,32 +1153,108 @@ estimatefromplane1:
             Eigen::Vector3f newdir, newpt;
             std::vector<Eigen::Vector3f> rectvertices = minAreaRect<PointNT>(planemodelcoeffs1, pointsonplane1_projected_onlyhead);// the last one is the center
             // (pickup 2 head vertices of the rectvertices)
-            //Eigen::Vector3f headpoint[2];
-            //headpoints[0] = rectvertices[0]; headpoints[1] = rectvertices[1];
-            //float maxlength[2];
-            //maxlength[0] = -std::numeric_limits<float>::max();  maxlength[1] = -std::numeric_limits<float>::max();
             std::vector<std::pair<double, unsigned int> > pairlengthtopointindex;
             for (size_t irectpoint = 0; irectpoint < 4; irectpoint++) {
                 Eigen::Vector3f& pt = rectvertices[irectpoint];
                 pairlengthtopointindex.push_back(std::pair<double, unsigned int>(((pt.dot (origdir) - origpt_shifted.dot (origdir)) / origdir.dot (origdir)), irectpoint));
             }
-                //Eigen::Vector3f& pt = rectvertices[irectpoint];
-                //float k = (pt.dot (origdir) - origpt_shifted.dot (origdir)) / origdir.dot (origdir);
-                //std::cout << "k: " << k << " maxlength[0]: " << maxlength[0] << " maxlength[1]: " << maxlength[1] << std::endl;
-                //if (maxlength[0] < k) {
-                    //maxlength[0] = k;
-                    //headpoints[0] = pt;
-                //}
-                //if (maxlength[1] < k && k < maxlength[0]) {
-                    //maxlength[1] = k;
-                    //headpoints[1] = pt;
-                //}
-                //std::cout << " -> maxlength[0]: " << maxlength[0] << " maxlength[1]: " << maxlength[1] << std::endl;
-            //}
             std::sort(pairlengthtopointindex.begin(), pairlengthtopointindex.end(), std::greater<std::pair<double, unsigned int> >());
-            Eigen::Vector3f& headpoints0 = rectvertices[pairlengthtopointindex[0].second];
-            Eigen::Vector3f& headpoints1 = rectvertices[pairlengthtopointindex[1].second];
-            newdir = (headpoints0 + headpoints1)/2.0 - rectvertices[4];
+            Eigen::Vector3f headpoints0 = rectvertices[pairlengthtopointindex[0].second];
+            Eigen::Vector3f headpoints1 = rectvertices[pairlengthtopointindex[1].second];
+            Eigen::Vector3f rectanglecenter = rectvertices[4];
+
+            // recompute rectvertices --------
+            Eigen::Vector3f headpoints2 = rectvertices[pairlengthtopointindex[2].second];
+            Eigen::Vector3f headpoints3 = rectvertices[pairlengthtopointindex[3].second];
+            size_t pointsinsidecyl = 0;
+            pcl::ModelCoefficients::Ptr rectverticesline0model(new pcl::ModelCoefficients);
+            pcl::ModelCoefficients::Ptr rectverticesline1model(new pcl::ModelCoefficients);
+            PointCloudInputPtr rectverticesline0points(new PointCloudInput);
+            PointCloudInputPtr rectverticesline1points(new PointCloudInput);
+            Eigen::Vector3f rectverticesline0dir = (headpoints1 - headpoints0).normalized();
+            Eigen::Vector3f rectverticesline1dir = (headpoints3 - headpoints2).normalized();
+            rectverticesline0model->values.resize(9);
+            rectverticesline0model->values[0] = headpoints0[0];
+            rectverticesline0model->values[1] = headpoints0[1];
+            rectverticesline0model->values[2] = headpoints0[2];
+            rectverticesline0model->values[3] = rectverticesline0dir[0];
+            rectverticesline0model->values[4] = rectverticesline0dir[1];
+            rectverticesline0model->values[5] = rectverticesline0dir[2];
+            rectverticesline0model->values[6] = 0.002;
+            rectverticesline0model->values[7] = (headpoints1 - headpoints0).norm();
+            rectverticesline0model->values[8] = 0;
+            rectverticesline1model->values.resize(9);
+            rectverticesline1model->values[0] = headpoints2[0];
+            rectverticesline1model->values[1] = headpoints2[1];
+            rectverticesline1model->values[2] = headpoints2[2];
+            rectverticesline1model->values[3] = rectverticesline1dir[0];
+            rectverticesline1model->values[4] = rectverticesline1dir[1];
+            rectverticesline1model->values[5] = rectverticesline1dir[2];
+            rectverticesline1model->values[6] = 0.002;
+            rectverticesline1model->values[7] = (headpoints3 - headpoints2).norm();
+            rectverticesline1model->values[8] = 0;
+            pcl::PointIndices::Ptr rectverticesline0indices(new pcl::PointIndices);
+            pcl::PointIndices::Ptr rectverticesline1indices(new pcl::PointIndices);
+            float maxtiplength0, mintiplength0, maxtiplength1, mintiplength1;
+            Eigen::Vector3f maxtippoint0, maxtippointonline0, mintippoint0, mintippointonline0;
+            Eigen::Vector3f maxtippoint1, maxtippointonline1, mintippoint1, mintippointonline1;
+            pointsinsidecyl = FindPointIndicesInsideCylinder<PointNT>(pointsonplane1_projected_onlyhead, rectverticesline0model, rectverticesline0indices);
+            do {
+            if (pointsinsidecyl == 0) {
+                std::cout << "skiprecomputerectangle0" << std::endl;
+                break;
+                //goto skiprecomputerectangle;
+            }
+            pointsinsidecyl = FindPointIndicesInsideCylinder<PointNT>(pointsonplane1_projected_onlyhead, rectverticesline1model, rectverticesline1indices);
+            if (pointsinsidecyl == 0) {
+                std::cout << "skiprecomputerectangle1" << std::endl;
+                break;
+                //goto skiprecomputerectangle;
+            }
+            extract.setInputCloud (pointsonplane1_projected_onlyhead);
+            extract.setIndices (rectverticesline0indices);
+            extract.setNegative (false);
+            extract.filter (*rectverticesline0points);
+            computeTipPointByProjectIntoLine<PointNT>(rectverticesline0points, rectverticesline0dir, headpoints0, maxtiplength0, maxtippoint0, maxtippointonline0, mintiplength0, mintippoint0, mintippointonline0);
+
+            extract.setInputCloud (pointsonplane1_projected_onlyhead);
+            extract.setIndices (rectverticesline1indices);
+            extract.setNegative (false);
+            extract.filter (*rectverticesline1points);
+            computeTipPointByProjectIntoLine<PointNT>(rectverticesline1points, rectverticesline1dir, headpoints2, maxtiplength1, maxtippoint1, maxtippointonline1, mintiplength1, mintippoint1, mintippointonline1);
+            headpoints0 = maxtippoint0;
+            headpoints1 = mintippoint0;
+            rectanglecenter = (maxtippoint0 + mintippoint0 + maxtippoint1 + mintippoint1)/4.0;
+
+            // visualization
+            pcl::PointCloud<pcl::PointXYZ>::Ptr rectcloudnew(new pcl::PointCloud<pcl::PointXYZ>);
+            rectcloudnew->width = 5;
+            rectcloudnew->height = 5;
+            rectcloudnew->points.resize(rectcloudnew->width*rectcloudnew->height);
+            rectcloudnew->points[0].x = maxtippoint0(0); rectcloudnew->points[0].y = maxtippoint0(1); rectcloudnew->points[0].z = maxtippoint0(2);
+            rectcloudnew->points[1].x = mintippoint0(0); rectcloudnew->points[1].y = mintippoint0(1); rectcloudnew->points[1].z = mintippoint0(2);
+            rectcloudnew->points[2].x = maxtippoint1(0); rectcloudnew->points[2].y = maxtippoint1(1); rectcloudnew->points[2].z = maxtippoint1(2);
+            rectcloudnew->points[3].x = mintippoint1(0); rectcloudnew->points[3].y = mintippoint1(1); rectcloudnew->points[3].z = mintippoint1(2);
+            rectcloudnew->points[4].x = rectanglecenter(0);
+            rectcloudnew->points[4].y = rectanglecenter(1);
+            rectcloudnew->points[4].z = rectanglecenter(2);
+
+            //pcl::PointXYZ pt0new, pt1new;
+            //pt0new.x = newpt[0]; pt0new.y = newpt[1]; pt0new.z = newpt[2];
+            //pt1new.x = newpt[0] + newdir[0] * 0.01; pt1new.y = newpt[1] + newdir[1] * 0.01; pt1new.z = newpt[2] + newdir[2] * 0.01;
+            if (enablefancyvisualization) {
+                viewer_->removePointCloud("rectverticesnew"+terminalindex);
+                viewer_->addPointCloud<pcl::PointXYZ>(rectcloudnew, pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> (rectcloudnew, 0, 90, 50),  "rectverticesnew"+terminalindex);
+                viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 25, "rectverticesnew"+terminalindex);
+                //viewer_->removeShape("termianlcylnew" + terminalindex);
+                //viewer_->addLine(pt0new, pt1new, 0, 1.0, 0.5, "termianlcylnew" + terminalindex);
+            }
+
+            // end of recompute rectvertices --------
+            } while (false);
+
+//skiprecomputerectangle:
+            newdir = (headpoints0 + headpoints1)/2.0 - rectanglecenter;
             newdir.normalize();
             newpt = (headpoints0 + headpoints1)/2.0 - y_offset * newdir;
             std::cout << "newdir: " << newdir << std::endl;
@@ -1229,17 +1317,21 @@ estimatefromplane1:
                 PointCloudInputPtr pointsonplane1_origin(new PointCloudInput);
                 pcl::transformPointCloud(*pointsonplane1_projected, *pointsonplane1_origin, tmptransform.inverse());
 
-                viewer_->removePointCloud("pointsonplane1_origin"+terminalindex);
-                viewer_->addPointCloud(pointsonplane1_origin, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (pointsonplane1_origin, 30, 130, 80),  "pointsonplane1_origin"+terminalindex);
-                viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 20, "pointsonplane1_origin"+terminalindex);
+                if (enablefancyvisualization) {
+                    viewer_->removePointCloud("pointsonplane1_origin"+terminalindex);
+                    viewer_->addPointCloud(pointsonplane1_origin, pcl::visualization::PointCloudColorHandlerCustom<PointNT> (pointsonplane1_origin, 30, 130, 80),  "pointsonplane1_origin"+terminalindex);
+                    viewer_->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 20, "pointsonplane1_origin"+terminalindex);
+                }
 
                 // count num of points above/below x-y plane
                 size_t abovepoints = 0, belowpoints = 0;
                 for (size_t ipoint = 0; ipoint < pointsonplane1_origin->points.size(); ipoint++) {
-                    if (pointsonplane1_origin->points[ipoint].z > 0){
-                        abovepoints++;
-                    } else if (pointsonplane1_origin->points[ipoint].z < 0) {
-                        belowpoints++;
+                    if (pointsonplane1_origin->points[ipoint].y > flatheadoffset) {
+                        if (pointsonplane1_origin->points[ipoint].z > z_offset){
+                            abovepoints++;
+                        } else if (pointsonplane1_origin->points[ipoint].z < -z_offset) {
+                            belowpoints++;
+                        }
                     }
                 }
                 std::cout << "above points: " << abovepoints << " below points: " << belowpoints << std::endl;
