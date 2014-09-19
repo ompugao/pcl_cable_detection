@@ -801,13 +801,10 @@ finally:
         }
         std::cout << "plane1 coeffs: " << *planemodelcoeffs1 << std::endl;
         PointCloudInputPtr pointsonplane1(new PointCloudInput());
-        PointCloudInputPtr pointsnotonplane1(new PointCloudInput());
         extract.setInputCloud (terminalscenepoints);
         extract.setIndices (inlierindices1);
         extract.setNegative (false);
         extract.filter (*pointsonplane1);
-        extract.setNegative (true);
-        extract.filter (*pointsnotonplane1);
 
         if (enablefancyvisualization) {/*{{{*/
             viewer_->removePointCloud("pointsonplane1_" + terminalindex);
@@ -822,9 +819,38 @@ finally:
         // Find the distance from point to plane.
         // http://mathworld.wolfram.com/Point-PlaneDistance.html
         pcl::PointIndices::Ptr inlierindices_enlarged1(new pcl::PointIndices);
+        double denominator = sqrt(pow(planemodelcoeffs1->values[0], 2) + pow(planemodelcoeffs1->values[1], 2) + pow(planemodelcoeffs1->values[2], 2));
+        for (size_t i = 0; i < terminalscenepoints->size(); i++) {
+            double dist = terminalscenepoints->points[i].x * planemodelcoeffs1->values[0] + terminalscenepoints->points[i].y * planemodelcoeffs1->values[1] +  terminalscenepoints->points[i].z * planemodelcoeffs1->values[2] + planemodelcoeffs1->values[3];
+            dist /= denominator;
+            if (-extractinliers_distthreshold < dist && dist < extractinliers_distthreshold) {
+                inlierindices_enlarged1->indices.push_back(i);
+            }
+        }
+        std::cout << "inlierindices_enlarged1: " << inlierindices_enlarged1->indices.size() << std::endl;
+
+        // recompute plane1
+        pcl::console::print_highlight("recompute plane1\n");
+        pcl::PointIndices::Ptr dummyinliers(new pcl::PointIndices);
+        seg.setOptimizeCoefficients (true);
+        seg.setModelType (pcl::SACMODEL_PLANE);
+        seg.setMethodType (pcl::SAC_RANSAC);
+        seg.setMaxIterations(1000);
+        seg.setDistanceThreshold (planethreshold);
+        seg.setInputCloud (terminalscenepoints);
+        seg.setIndices (inlierindices_enlarged1);
+        seg.segment (*dummyinliers, *planemodelcoeffs1);
+        if (Eigen::Vector3f(planemodelcoeffs1->values[0], planemodelcoeffs1->values[1], planemodelcoeffs1->values[2]).dot(lookatvector4.segment<3>(0)) > 0) {  // if the normal faces to the z-axis of camera coordinates
+            planemodelcoeffs1->values[0] *= -1; planemodelcoeffs1->values[1] *= -1; planemodelcoeffs1->values[2] *= -1; planemodelcoeffs1->values[3] *= -1;
+        }
+
+        // Find the distance from point to plane.
+        // http://mathworld.wolfram.com/Point-PlaneDistance.html
+        //pcl::PointIndices::Ptr inlierindices_enlarged1(new pcl::PointIndices);
+        inlierindices_enlarged1->indices.resize(0);
         pcl::PointIndices::Ptr inlierindices_upper1(new pcl::PointIndices);
         pcl::PointIndices::Ptr inlierindices_lower1(new pcl::PointIndices);
-        double denominator = sqrt(pow(planemodelcoeffs1->values[0], 2) + pow(planemodelcoeffs1->values[1], 2) + pow(planemodelcoeffs1->values[2], 2));
+        denominator = sqrt(pow(planemodelcoeffs1->values[0], 2) + pow(planemodelcoeffs1->values[1], 2) + pow(planemodelcoeffs1->values[2], 2));
         for (size_t i = 0; i < terminalscenepoints->size(); i++) {
             double dist = terminalscenepoints->points[i].x * planemodelcoeffs1->values[0] + terminalscenepoints->points[i].y * planemodelcoeffs1->values[1] +  terminalscenepoints->points[i].z * planemodelcoeffs1->values[2] + planemodelcoeffs1->values[3];
             dist /= denominator;
@@ -843,8 +869,11 @@ finally:
         std::cout << "inlierindices_lower1: " << inlierindices_lower1->indices.size() << std::endl;
 
         PointCloudInputPtr terminalscenepoints2(new PointCloudInput());
+        PointCloudInputPtr pointsonplane_enlarged1(new PointCloudInput());
         extract.setInputCloud (terminalscenepoints);
         extract.setIndices (inlierindices_enlarged1);
+        extract.setNegative (false);
+        extract.filter (*pointsonplane_enlarged1);
         extract.setNegative (true);
         extract.filter (*terminalscenepoints2);
 
@@ -1290,6 +1319,8 @@ estimatefromplane1:
 
             Eigen::Affine3f rot = Eigen::Affine3f::Identity();
             rot.matrix().block<3,1>(0,1) = -newdir;
+            std::cout << "head plane size is " << headarea << ", ";
+            std::cout << " > " << areasize_threshold << "?" << std::endl;
             if (headarea > areasize_threshold) {
                 if (inlierindices_upper1->indices.size() < indicessize_protruding) {
                     // でっぱりが奥
