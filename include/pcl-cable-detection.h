@@ -1190,18 +1190,18 @@ estimatefromplane1:
             std::sort(pairlengthtopointindex.begin(), pairlengthtopointindex.end(), std::greater<std::pair<double, unsigned int> >());
             Eigen::Vector3f headpoints0 = rectvertices[pairlengthtopointindex[0].second];
             Eigen::Vector3f headpoints1 = rectvertices[pairlengthtopointindex[1].second];
+            Eigen::Vector3f headpoints2 = rectvertices[pairlengthtopointindex[2].second];
+            Eigen::Vector3f headpoints3 = rectvertices[pairlengthtopointindex[3].second];
             Eigen::Vector3f rectanglecenter = rectvertices[4];
 
             // recompute rectvertices --------
-            Eigen::Vector3f headpoints2 = rectvertices[pairlengthtopointindex[2].second];
-            Eigen::Vector3f headpoints3 = rectvertices[pairlengthtopointindex[3].second];
             size_t pointsinsidecyl = 0;
             pcl::ModelCoefficients::Ptr rectverticesline0model(new pcl::ModelCoefficients);
             pcl::ModelCoefficients::Ptr rectverticesline1model(new pcl::ModelCoefficients);
             PointCloudInputPtr rectverticesline0points(new PointCloudInput);
             PointCloudInputPtr rectverticesline1points(new PointCloudInput);
-            Eigen::Vector3f rectverticesline0dir = (headpoints1 - headpoints0).normalized();
-            Eigen::Vector3f rectverticesline1dir = (headpoints3 - headpoints2).normalized();
+            Eigen::Vector3f rectverticesline0dir = (headpoints1 - headpoints0).normalized();//head
+            Eigen::Vector3f rectverticesline1dir = (headpoints3 - headpoints2).normalized();//tail
             rectverticesline0model->values.resize(9);
             rectverticesline0model->values[0] = headpoints0[0];
             rectverticesline0model->values[1] = headpoints0[1];
@@ -1251,9 +1251,18 @@ estimatefromplane1:
             extract.setNegative (false);
             extract.filter (*rectverticesline1points);
             computeTipPointByProjectIntoLine<PointNT>(rectverticesline1points, rectverticesline1dir, headpoints2, maxtiplength1, maxtippoint1, maxtippointonline1, mintiplength1, mintippoint1, mintippointonline1);
+
+            float headtotaillengthratio = (maxtippoint0 - mintippoint0).norm() / (maxtippoint1 - mintippoint1).norm();
+            std::cout << "headtotaillengthratio: " << headtotaillengthratio << std::endl;
+            if ( headtotaillengthratio < 0.9 || 1.1 < headtotaillengthratio) {
+                std::cout << "the estimated head not a rectangle anymore. skiprecomputerectangle1." << std::endl;
+                break;
+            }
+
             headpoints0 = maxtippoint0;
             headpoints1 = mintippoint0;
-            rectanglecenter = (maxtippoint0 + mintippoint0 + maxtippoint1 + mintippoint1)/4.0;
+            headpoints2 = maxtippoint1;
+            headpoints3 = mintippoint1;
 
             // visualization
             pcl::PointCloud<pcl::PointXYZ>::Ptr rectcloudnew(new pcl::PointCloud<pcl::PointXYZ>);
@@ -1264,6 +1273,7 @@ estimatefromplane1:
             rectcloudnew->points[1].x = mintippoint0(0); rectcloudnew->points[1].y = mintippoint0(1); rectcloudnew->points[1].z = mintippoint0(2);
             rectcloudnew->points[2].x = maxtippoint1(0); rectcloudnew->points[2].y = maxtippoint1(1); rectcloudnew->points[2].z = maxtippoint1(2);
             rectcloudnew->points[3].x = mintippoint1(0); rectcloudnew->points[3].y = mintippoint1(1); rectcloudnew->points[3].z = mintippoint1(2);
+            rectanglecenter = (maxtippoint0 + mintippoint0 + maxtippoint1 + mintippoint1)/4.0;
             rectcloudnew->points[4].x = rectanglecenter(0);
             rectcloudnew->points[4].y = rectanglecenter(1);
             rectcloudnew->points[4].z = rectanglecenter(2);
@@ -1283,7 +1293,7 @@ estimatefromplane1:
             } while (false);
 
 //skiprecomputerectangle:
-            newdir = (headpoints0 + headpoints1)/2.0 - rectanglecenter;
+            newdir = (headpoints0 + headpoints1)/2.0 - (headpoints2 + headpoints3)/2.0;
             newdir.normalize();
             newpt = (headpoints0 + headpoints1)/2.0 - y_offset * newdir;
             std::cout << "newdir: " << newdir << std::endl;
