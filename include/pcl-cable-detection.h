@@ -747,7 +747,7 @@ finally:
         double y_offset = 0.00535;
         double x_offset = 0.0058;
         double flatheadoffset = 0.012; // 0.012 // 先端から平面が続く長さ
-        double areasize_threshold = 135 * 1e-6; // > 6.4 * flatheadoffset && < 11.6 * flatheadoffset
+        double areasize_threshold = 100 * 1e-6;//135 * 1e-6; // > 6.4 * flatheadoffset && < 11.6 * flatheadoffset
         double radiusoutlierremovalsize = 0.0003;
 
         pcl::ExtractIndices<PointNT> extract;
